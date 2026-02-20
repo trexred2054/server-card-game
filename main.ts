@@ -654,7 +654,7 @@ class GameEngine {
                     bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
                     this.updatePower(bot);
                     this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: chosen, power: chosen.power, isForcePickPlay: true });
-                    this.broadcastLog(`👤 ${bot.name} Force Pick: ${chosen.name} (Power: ${chosen.power})`);
+                    this.broadcastLog(`👤 ${bot.name} Mengambil kartu: ${chosen.name} (Power: ${chosen.power})`);
                 }
             });
             this.gs.forcePickMode = false;
@@ -708,7 +708,7 @@ class GameEngine {
         player.hasPlayed = true;
         this.updatePower(player);
         this.gs.currentRoundPlays.push({ playerId: player.id, playerName: player.name, card, power: card.power, isForcePickPlay: true });
-        this.broadcastLog(`👤 ${player.name} Force Pick: ${card.name} (Power: ${card.power})`);
+        this.broadcastLog(`👤 ${player.name} Mengambil kartu: ${card.name} (Power: ${card.power})`);
 
         this.gs.forcePickPlayers.filter(p => p.isBot && !p.hasPlayed).forEach(bot => {
             if (this.gs.topCard.length > 0) {
@@ -717,7 +717,7 @@ class GameEngine {
                 bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
                 this.updatePower(bot);
                 this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: chosen, power: chosen.power, isForcePickPlay: true });
-                this.broadcastLog(`👤 ${bot.name} Force Pick: ${chosen.name} (Power: ${chosen.power})`);
+                this.broadcastLog(`👤 ${bot.name} Mengambil kartu: ${chosen.name} (Power: ${chosen.power})`);
             }
         });
         this.gs.forcePickMode = false;
@@ -1000,7 +1000,7 @@ class GameEngine {
             if (this.gs.phase === 2 && player.mustForcePick && !player.hasPlayed && this.gs.forcePickMode) {
                 if (this.gs.topCard.length > 0) {
                     const card = [...this.gs.topCard].sort((a, b) => b.power - a.power)[0];
-                    this.broadcastLog(`👤 AUTO: ${player.name} Force Pick ${card.name}`);
+                    this.broadcastLog(`👤 AUTO: ${player.name} Mengambil kartu: ${card.name}`);
                     this.handleForcePickCardInternal(player, card.id);
                 }
                 return;
@@ -1246,7 +1246,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
                     case 'REJOIN_ROOM':
                         if (data.roomId && data.playerId) {
                             const success = matchmaking.rejoinRoom(
-                                data.roomId, data.playerId, data.playerName || 'Player', 
+                                data.roomId, data.playerId, data.playerName || 'Player',
                                 data.userUid || '',
                                 socket
                             );
@@ -1259,7 +1259,25 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
                                     console.log(`🔄 ${data.playerId} rejoined ${data.roomId}`);
                                 }
                             } else {
-                                socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan, sudah selesai, atau akun tidak cocok.' }));
+                                // Cek apakah room sudah finished — kirim ulang GAME_OVER agar client bisa simpan stats
+                                const finishedRoom = matchmaking.getRoom(data.roomId);
+                                if (finishedRoom && finishedRoom.status === 'finished') {
+                                    const gp = finishedRoom.gameEngine.getPlayerById(data.playerId);
+                                    const uidOk = gp && (!gp.userUid || gp.userUid === (data.userUid || ''));
+                                    if (uidOk) {
+                                        socket.send(JSON.stringify({
+                                            type: 'GAME_OVER',
+                                            players: finishedRoom.gameEngine.gs.players.map(p => ({
+                                                name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot
+                                            }))
+                                        }));
+                                        console.log(`📤 GAME_OVER dikirim ulang ke ${data.playerId} (late rejoin - room sudah finished)`);
+                                    } else {
+                                        socket.send(JSON.stringify({ type: 'ERROR', message: 'Akun tidak cocok.' }));
+                                    }
+                                } else {
+                                    socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sudah berakhir.' }));
+                                }
                             }
                         }
                         break;
