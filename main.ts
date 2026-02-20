@@ -1,0 +1,1292 @@
+// ================================================
+// CARD GAME NUSANTARA - FULL SERVER v2
+// main.ts - COMPLETE VERSION WITH ALL FIXES
+// ================================================
+
+interface Card {
+    id: string; name: string; type: string;
+    rarity: string; power: number; province: string;
+}
+
+interface GamePlayer {
+    id: string; name: string; isBot: boolean; socket?: WebSocket;
+    hand: Card[]; totalPower: number; hasPlayed: boolean;
+    mustDraw: boolean; mustForcePick: boolean; freed: boolean;
+    winner: boolean; rank: number; isProcessingAction: boolean;
+    afkTimer?: number;
+    autoMode: boolean;
+    disconnectedAt?: number;
+    userUid: string;
+    leftMatch: boolean;
+}
+
+interface RoundPlay { playerId: string; playerName: string; card: Card | null; power: number; isForcePickPlay?: boolean; }
+interface RoundHistory { round: number; plays: RoundPlay[]; }
+
+const ALL_PROVINCES = [
+    { name: "Aceh", cards: [
+        { name: "Banda Aceh", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumoh Aceh", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Ulee Balang", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Saman", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Mie Aceh", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sumatera Utara", cards: [
+        { name: "Medan", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Bolon", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Ulos", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Tor-Tor", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Bika Ambon", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sumatera Barat", cards: [
+        { name: "Padang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Gadang", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Bundo Kanduang", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Piring", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Rendang", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Riau", cards: [
+        { name: "Pekanbaru", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Selaso Jatuh Kembar", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Teluk Belanga", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Zapin", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Gulai Belacan", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Kepulauan Riau", cards: [
+        { name: "Tanjungpinang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Belah Bubung", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Kebaya Labuh", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Tandak", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Otak-otak", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Jambi", cards: [
+        { name: "Jambi", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Panggung", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Baju Kurung Tanggung", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Sekapur Sirih", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Tempoyak", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Bengkulu", cards: [
+        { name: "Bengkulu", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Bubungan Lima", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Rejang Lebong", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Andun", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Pendap", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sumatera Selatan", cards: [
+        { name: "Palembang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Limas", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Aesan Gede", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Tanggai", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Pempek", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Bangka Belitung", cards: [
+        { name: "Pangkalpinang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Rakit", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Pakaian Seting", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Sepen", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Lempah Kuning", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Lampung", cards: [
+        { name: "Bandar Lampung", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Nuwou Sesat", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Tulang Bawang", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Sigeh Penguten", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Seruit", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "DKI Jakarta", cards: [
+        { name: "Jakarta", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Kebaya", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Kebaya Encim", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Yapong", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Kerak Telor", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Jawa Barat", cards: [
+        { name: "Bandung", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Kasepuhan", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Kebaya Sunda", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Jaipong", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Seblak", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Banten", cards: [
+        { name: "Serang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Baduy", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Pakaian Pangsi", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Cokek", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Sate Bandeng", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Jawa Tengah", cards: [
+        { name: "Semarang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Joglo", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Kebaya Jawa", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Serimpi", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Lumpia", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "DI Yogyakarta", cards: [
+        { name: "Yogyakarta", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Bangsal Kencono", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Kebaya Kesatrian", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Kumbang", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Gudeg", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Jawa Timur", cards: [
+        { name: "Surabaya", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Situbondo", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Pesa'an", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Remo", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Rujak Cingur", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Bali", cards: [
+        { name: "Denpasar", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Gapura Candi Bentar", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Payas Agung", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Pendet", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Ayam Betutu", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Nusa Tenggara Barat", cards: [
+        { name: "Mataram", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Dalam Loka", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Lambung", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Gandrung", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Ayam Taliwang", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Nusa Tenggara Timur", cards: [
+        { name: "Kupang", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Musalaki", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Amarasi", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Caci", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Se'i", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Kalimantan Barat", cards: [
+        { name: "Pontianak", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Panjang", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "King Baba", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Monong", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Bubur Pedas", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Kalimantan Tengah", cards: [
+        { name: "Palangkaraya", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Betang", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Sangkarut", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Giring-giring", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Juhu Singkah", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Kalimantan Selatan", cards: [
+        { name: "Banjarmasin", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Bubungan Tinggi", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Babaju Kun Galung Pacinan", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Baksa Kembang", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Soto Banjar", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Kalimantan Timur", cards: [
+        { name: "Samarinda", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Lamin", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Kustin", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Gong", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Nasi Kuning", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Kalimantan Utara", cards: [
+        { name: "Tanjung Selor", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Baloy", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Ta'a", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Jepen", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Kepiting Soka", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sulawesi Utara", cards: [
+        { name: "Manado", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Walewangko", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Laku Tepu", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Maengket", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Bubur Manado", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Gorontalo", cards: [
+        { name: "Gorontalo", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Dulohupa", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Biliu", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Polopalo", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Binte Biluhuta", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sulawesi Tengah", cards: [
+        { name: "Palu", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Tambi", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Koje", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Lumense", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Kaledo", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sulawesi Barat", cards: [
+        { name: "Mamuju", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Boyang", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Pattuqduq Towaine", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Patuddu", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Bau Peapi", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sulawesi Selatan", cards: [
+        { name: "Makassar", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Tongkonan", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Baju Bodo", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Kipas Pakarena", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Coto Makassar", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Sulawesi Tenggara", cards: [
+        { name: "Kendari", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Istana Buton", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Babu Nggawi", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Lulo", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Lapa-lapa", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Maluku", cards: [
+        { name: "Ambon", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Baileo", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Baju Cele", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Cakalele", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Papeda", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Maluku Utara", cards: [
+        { name: "Sofifi", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Sasadu", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Manteren Lamo", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Lenso", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Gohu Ikan", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Papua", cards: [
+        { name: "Jayapura", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Honai", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Koteka", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Musyoh", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Papeda Papua", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Papua Barat", cards: [
+        { name: "Manokwari", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Mod Aki Aksa", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Ewer", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Suanggi", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Ikan Bakar Manokwari", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Papua Selatan", cards: [
+        { name: "Merauke", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Gotad", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Pummi", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Gatzi", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Sagu Sep", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Papua Tengah", cards: [
+        { name: "Nabire", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Karapao", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Sali", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Yuw", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Ayam Bunaken", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Papua Pegunungan", cards: [
+        { name: "Wamena", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Honai Pegunungan", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Yokal", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Selamat Datang", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Udang Selingkuh", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]},
+    { name: "Papua Barat Daya", cards: [
+        { name: "Sorong", type: "Ibu Kota", rarity: "legendary", power: 5 },
+        { name: "Rumah Kambik", type: "Rumah Adat", rarity: "epic", power: 4 },
+        { name: "Boe", type: "Pakaian Adat", rarity: "rare", power: 3 },
+        { name: "Tari Aluyen", type: "Tarian", rarity: "uncommon", power: 2 },
+        { name: "Udang Karang", type: "Makanan Khas", rarity: "common", power: 1 }
+    ]}
+];
+
+const ALL_CARDS: Card[] = [];
+ALL_PROVINCES.forEach(province => {
+    province.cards.forEach(card => {
+        ALL_CARDS.push({ ...card, province: province.name, id: `${province.name}-${card.name}` });
+    });
+});
+
+class GameEngine {
+    roomId: string;
+    onGameOver?: () => void;
+
+    gs: {
+        round: number; phase: number; phase1Player: string | null;
+        drawPile: Card[]; discardPile: Card[]; topCard: Card[];
+        currentProvince: string | null; players: GamePlayer[];
+        forcePickMode: boolean; forcePickPlayers: GamePlayer[];
+        forcePickProcessing: boolean; isHandlingForcePick: boolean;
+        isEndingRound: boolean; isStartingPhase: boolean;
+        currentRoundPlays: RoundPlay[]; roundHistory: RoundHistory[];
+        winners: GamePlayer[]; gameOver: boolean; surrenderCount: number;
+    };
+
+    constructor(roomId: string) {
+        this.roomId = roomId;
+        this.gs = {
+            round: 1, phase: 1, phase1Player: null,
+            drawPile: [], discardPile: [], topCard: [],
+            currentProvince: null, players: [],
+            forcePickMode: false, forcePickPlayers: [],
+            forcePickProcessing: false, isHandlingForcePick: false,
+            isEndingRound: false, isStartingPhase: false,
+            currentRoundPlays: [], roundHistory: [],
+            winners: [], gameOver: false, surrenderCount: 0
+        };
+    }
+
+    addPlayer(p: { id: string; name: string; isBot: boolean; socket?: WebSocket; userUid: string }) {
+        const player: GamePlayer = {
+            id: p.id, name: p.name, isBot: p.isBot, socket: p.socket,
+            hand: [], totalPower: 0, hasPlayed: false, mustDraw: false,
+            mustForcePick: false, freed: false, winner: false, rank: 0,
+            isProcessingAction: false, autoMode: false, userUid: p.userUid || '',
+            leftMatch: false
+        };
+        this.gs.players.push(player);
+    }
+
+    addBot(name: string) {
+        this.addPlayer({ id: `bot_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name, isBot: true, userUid: 'BOT' });
+    }
+
+    static BOT_NAMES = ['Miya','Nayla','Aldi','Marcel','Zoe','Kara','Mega','Genta','Flex','Angel','Teorita','Miko','Luba','Nana','Kong','Walka'];
+    static usedBotNames: string[] = [];
+
+    static pickBotName(): string {
+        const available = GameEngine.BOT_NAMES.filter(n => !GameEngine.usedBotNames.includes(n));
+        const pool = available.length > 0 ? available : GameEngine.BOT_NAMES;
+        const name = pool[Math.floor(Math.random() * pool.length)];
+        GameEngine.usedBotNames.push(name);
+        if (GameEngine.usedBotNames.length > GameEngine.BOT_NAMES.length) GameEngine.usedBotNames = [];
+        return name;
+    }
+
+    private shuffle<T>(arr: T[]): T[] {
+        const a = [...arr];
+        for (let i = a.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+    }
+
+    private getActivePlayers() { return this.gs.players.filter(p => !p.winner); }
+    private updatePower(p: GamePlayer) { p.totalPower = p.hand.reduce((s, c) => s + c.power, 0); }
+
+    private checkWin(player: GamePlayer) {
+        if (player.hand.length === 0 && !player.winner) {
+            player.winner = true;
+            player.rank = this.gs.winners.length + 1;
+            this.gs.winners.push(player);
+            const medals = ['🥇','🥈','🥉','🎖️'];
+            this.broadcastLog(`${medals[player.rank-1]} ${player.name} MENANG! Peringkat: ${player.rank}`);
+        }
+    }
+
+    private clearAfkTimer(p: GamePlayer) {
+        if (p.afkTimer) { clearTimeout(p.afkTimer); p.afkTimer = undefined; }
+    }
+
+    private clearAllAfkTimers() { this.gs.players.forEach(p => this.clearAfkTimer(p)); }
+
+    private setAfkTimer(player: GamePlayer, action: () => void, delay = 30000) {
+        this.clearAfkTimer(player);
+        if (player.isBot) return;
+        player.afkTimer = setTimeout(() => {
+            if (!this.gs.gameOver) {
+                this.broadcastLog(`⏰ ${player.name} AFK - aksi otomatis`);
+                action();
+            }
+        }, delay) as unknown as number;
+    }
+
+    private dealCard(player: GamePlayer, maxRetry = 50): boolean {
+        if (this.gs.drawPile.length === 0) {
+            player.mustForcePick = true; player.mustDraw = false;
+            this.broadcastLog(`⚠️ Draw Pile habis! ${player.name} → Force Pick`);
+            return false;
+        }
+        const usedIds = new Set([
+            ...this.gs.topCard.map(c => c.id),
+            ...this.gs.players.flatMap(p => p.hand.map(c => c.id))
+        ]);
+        for (let attempt = 0; attempt < maxRetry; attempt++) {
+            if (this.gs.drawPile.length === 0) break;
+            const card = this.gs.drawPile.pop()!;
+            if (!usedIds.has(card.id)) { player.hand.push(card); this.updatePower(player); return true; }
+            this.gs.drawPile.splice(Math.floor(Math.random() * this.gs.drawPile.length), 0, card);
+        }
+        player.mustForcePick = true; player.mustDraw = false;
+        return false;
+    }
+
+    startGame() {
+        this.gs.drawPile = this.shuffle([...ALL_CARDS]);
+        const usedIds = new Set<string>();
+        this.gs.players.forEach(player => {
+            for (let i = 0; i < 47; i++) {
+                for (let attempt = 0; attempt < 100; attempt++) {
+                    if (this.gs.drawPile.length === 0) break;
+                    const card = this.gs.drawPile.pop()!;
+                    if (!usedIds.has(card.id)) {
+                        player.hand.push(card); usedIds.add(card.id);
+                        this.updatePower(player); break;
+                    }
+                    this.gs.drawPile.unshift(card);
+                }
+            }
+        });
+        this.broadcastLog(`🎮 Game dimulai! Setiap pemain mendapat 47 kartu.`);
+        setTimeout(() => this.startPhase1(), 500);
+    }
+
+    private startPhase1() {
+        if (this.gs.isStartingPhase) return;
+        this.gs.isStartingPhase = true;
+        this.gs.phase = 1;
+        this.gs.topCard = []; this.gs.currentProvince = null;
+        this.gs.currentRoundPlays = [];
+        this.gs.forcePickMode = false; this.gs.forcePickPlayers = [];
+        this.gs.forcePickProcessing = false; this.gs.isHandlingForcePick = false;
+        this.gs.players.forEach(p => {
+            p.hasPlayed = false; p.mustDraw = false; p.mustForcePick = false;
+            p.freed = false; p.isProcessingAction = false;
+            this.clearAfkTimer(p);
+        });
+        setTimeout(() => { this.gs.isStartingPhase = false; }, 100);
+
+        if (this.gs.round === 1) {
+            this.broadcastGameState();
+            setTimeout(() => this.systemPlayPhase1(), 800);
+            return;
+        }
+
+        const lastRound = this.gs.roundHistory[this.gs.roundHistory.length - 1];
+        const validPlays = (lastRound?.plays || []).filter(play => {
+            if (play.power === 0) return false;
+            if (play.isForcePickPlay) return false;
+            const p = this.gs.players.find(p => p.id === play.playerId);
+            return p && !p.winner;
+        });
+
+        if (validPlays.length === 0) {
+            this.broadcastGameState();
+            setTimeout(() => this.systemPlayPhase1(), 800);
+            return;
+        }
+
+        validPlays.sort((a, b) => b.power - a.power);
+        const phase1Player = this.gs.players.find(p => p.id === validPlays[0].playerId);
+        if (!phase1Player) {
+            this.broadcastGameState();
+            setTimeout(() => this.systemPlayPhase1(), 800);
+            return;
+        }
+
+        this.gs.phase1Player = phase1Player.id;
+        this.broadcastLog(`🎯 👤 ${phase1Player.name} mendapat giliran Tahap 1!`);
+
+        if (phase1Player.isBot) {
+            this.broadcastGameState();
+            setTimeout(() => this.botPlayPhase1(phase1Player), 1000);
+        } else {
+            this.setAfkTimer(phase1Player, () => {
+                if (!phase1Player.hasPlayed && phase1Player.hand.length > 0)
+                    this.botPlayPhase1(phase1Player);
+            });
+            this.broadcastGameState();
+        }
+    }
+
+    private systemPlayPhase1() {
+        let card: Card | undefined;
+        if (this.gs.drawPile.length > 0) {
+            card = this.gs.drawPile.pop()!;
+        } else if (this.gs.discardPile.length > 0) {
+            card = this.gs.discardPile.splice(Math.floor(Math.random() * this.gs.discardPile.length), 1)[0];
+            this.broadcastLog(`♻️ Draw Pile habis! Ambil dari Discard Pile`);
+        } else {
+            this.broadcastLog(`❌ Tidak ada kartu tersisa! Game berakhir.`);
+            this.endGame(); return;
+        }
+        this.gs.currentProvince = card.province;
+        this.gs.topCard = [card];
+        this.gs.phase1Player = 'system';
+        this.gs.currentRoundPlays.push({ playerId: 'system', playerName: 'Sistem', card, power: card.power });
+        this.broadcastLog(`🎴 Sistem menjatuhkan ${card.name} (${card.province}) - Power ${card.power}`);
+        this.broadcastGameState();
+        setTimeout(() => this.startPhase2(), 1500);
+    }
+
+    private botPlayPhase1(bot: GamePlayer) {
+        if (bot.hasPlayed || bot.hand.length === 0) return;
+        const card = [...bot.hand].sort((a, b) => a.power - b.power)[0];
+        this.gs.currentProvince = card.province;
+        this.gs.topCard = [card];
+        bot.hand.splice(bot.hand.findIndex(c => c.id === card.id), 1);
+        bot.hasPlayed = true;
+        this.updatePower(bot);
+        this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card, power: card.power });
+        this.broadcastLog(`👤 ${bot.name} menjatuhkan ${card.name} (${card.province}) - Power ${card.power}`);
+        this.checkWin(bot);
+        this.broadcastGameState();
+        setTimeout(() => this.startPhase2(), 1000);
+    }
+
+    private startPhase2() {
+        this.gs.phase = 2;
+        this.gs.forcePickProcessing = false;
+        this.gs.isHandlingForcePick = false;
+        this.broadcastLog(`📍 Tahap 2 dimulai! Provinsi aktif: ${this.gs.currentProvince}`); 
+        const drawPileEmpty = this.gs.drawPile.length === 0;
+
+        this.getActivePlayers().forEach(player => {
+            if (player.hasPlayed) return;
+            const hasMatching = player.hand.some(c => c.province === this.gs.currentProvince);
+            if (!hasMatching) {
+                if (drawPileEmpty) {
+                    player.mustForcePick = true;
+                } else {
+                    player.mustDraw = true;
+                    if (!player.isBot) {
+                        this.setAfkTimer(player, () => {
+                            if (player.mustDraw && !player.hasPlayed) this.handleDrawCardInternal(player);
+                        });
+                    }
+                }
+            } else if (!player.isBot) {
+                this.setAfkTimer(player, () => {
+                    if (!player.hasPlayed && !player.mustDraw && !player.mustForcePick) {
+                        const matching = player.hand.filter(c => c.province === this.gs.currentProvince);
+                        if (matching.length > 0) this.handlePlayCardInternal(player, matching.sort((a,b) => a.power - b.power)[0]);
+                    }
+                });
+            }
+        });
+
+        this.broadcastGameState();
+        setTimeout(() => this.botsPlayPhase2(), 1000);
+    }
+
+    private botsPlayPhase2() {
+        const bots = this.getActivePlayers().filter(p => p.isBot && !p.hasPlayed);
+        if (bots.length === 0) { setTimeout(() => this.checkPhase2End(), 500); return; }
+        let done = 0;
+        bots.forEach((bot, idx) => {
+            setTimeout(() => {
+                this.botPlayPhase2(bot);
+                if (++done === bots.length) setTimeout(() => this.checkPhase2End(), 800);
+            }, (idx + 1) * 700);
+        });
+    }
+
+    private botPlayPhase2(bot: GamePlayer) {
+        if (bot.hasPlayed) return;
+        if (bot.mustDraw) {
+            if (this.dealCard(bot)) {
+                bot.mustDraw = false; bot.hasPlayed = true;
+                this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: null, power: 0 });
+                this.broadcastLog(`👤 ${bot.name} melakukan Draw Card`);
+            }
+            this.broadcastGameState(); return;
+        }
+        const matching = bot.hand.filter(c => c.province === this.gs.currentProvince);
+        if (matching.length > 0) {
+            const card = matching.sort((a,b) => a.power - b.power)[0];
+            if (this.gs.topCard.some(c => c.id === card.id)) return;
+            bot.hand.splice(bot.hand.findIndex(c => c.id === card.id), 1);
+            this.gs.topCard.push(card);
+            bot.hasPlayed = true;
+            this.updatePower(bot);
+            this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card, power: card.power });
+            this.checkWin(bot);
+            this.broadcastGameState();
+        }
+    }
+    private checkPhase2End() {
+        if (this.gs.isHandlingForcePick || this.gs.isEndingRound) return;
+        const human = this.gs.players.find(p => !p.isBot && !p.winner);
+        if (human && !human.hasPlayed && !human.mustForcePick) return;
+        const activePlayers = this.getActivePlayers();
+        if (!activePlayers.every(p => p.hasPlayed || p.mustForcePick)) return;
+        const fpPlayers = activePlayers.filter(p => p.mustForcePick && !p.hasPlayed);
+        if (fpPlayers.length === 0) { this.endRound(); return; }
+        if (this.gs.isHandlingForcePick) return;
+        this.gs.isHandlingForcePick = true;
+        setTimeout(() => this.handleForcePickDecision(fpPlayers), 500);
+    }
+
+    private handleForcePickDecision(fpPlayers: GamePlayer[]) {
+        const totalJatuhkan = this.gs.currentRoundPlays.filter(p => p.card?.province === this.gs.currentProvince).length;
+        const totalFP = fpPlayers.length;
+
+        if (totalJatuhkan >= totalFP) {
+            this.broadcastLog(`⚠️ Tidak ada pembebasan - semua Force Pick harus ambil kartu`);
+            this.processForcePick(fpPlayers, []);
+        } else {
+            const jumlahBebas = totalFP - totalJatuhkan;
+            const sorted = [...fpPlayers].sort((a, b) => {
+                if (a.hand.length !== b.hand.length) return b.hand.length - a.hand.length;
+                if (a.totalPower !== b.totalPower) return a.totalPower - b.totalPower;
+                return Math.random() - 0.5;
+            });
+            for (let i = 0; i < jumlahBebas; i++) {
+                sorted[i].mustForcePick = false; sorted[i].hasPlayed = true; sorted[i].freed = true;
+                this.broadcastLog(`✅ 👤 ${sorted[i].name} DIBEBASKAN dari Force Pick!`);
+            }
+            this.processForcePick(sorted.slice(jumlahBebas), sorted.slice(0, jumlahBebas));
+        }
+    }
+
+    private processForcePick(mustPickPlayers: GamePlayer[], freedPlayers: GamePlayer[]) {
+        const humanMustPick = mustPickPlayers.find(p => !p.isBot);
+        if (humanMustPick) {
+            this.gs.forcePickMode = true;
+            this.gs.forcePickPlayers = mustPickPlayers;
+            this.gs.forcePickProcessing = false;
+            this.broadcastLog(`⚠️ ${humanMustPick.name} harus memilih kartu dari Top Card!`);
+            this.broadcastGameState();
+            this.setAfkTimer(humanMustPick, () => {
+                if (!humanMustPick.hasPlayed && this.gs.topCard.length > 0) {
+                    this.handleForcePickCardInternal(humanMustPick, this.gs.topCard[0].id);
+                    this.broadcastLog(`⏰ ${humanMustPick.name} auto-force-pick (AFK)`);
+                }
+            });
+        } else {
+            mustPickPlayers.forEach(bot => {
+                if (this.gs.topCard.length > 0) {
+                    const chosen = [...this.gs.topCard].sort((a,b) => b.power - a.power)[0];
+                    this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === chosen.id), 1);
+                    bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
+                    this.updatePower(bot);
+                    this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: chosen, power: chosen.power, isForcePickPlay: true });
+                    this.broadcastLog(`👤 ${bot.name} Force Pick: ${chosen.name} (Power: ${chosen.power})`);
+                }
+            });
+            this.gs.forcePickMode = false;
+            this.broadcastGameState();
+            setTimeout(() => { this.gs.isHandlingForcePick = false; if (!this.gs.isEndingRound) this.endRound(); }, 500);
+        }
+    }
+
+    private handlePlayCardInternal(player: GamePlayer, card: Card) {
+        this.clearAfkTimer(player);
+        if (this.gs.phase === 1) {
+            player.hand.splice(player.hand.findIndex(c => c.id === card.id), 1);
+            player.hasPlayed = true;
+            this.gs.currentProvince = card.province; this.gs.topCard = [card];
+            this.updatePower(player);
+            this.gs.currentRoundPlays.push({ playerId: player.id, playerName: player.name, card, power: card.power });
+            this.broadcastLog(`👤 ${player.name} menjatuhkan ${card.name} (${card.province}) - Power ${card.power}`);
+            this.checkWin(player); this.broadcastGameState();
+            setTimeout(() => this.startPhase2(), 800);
+        } else {
+            player.hand.splice(player.hand.findIndex(c => c.id === card.id), 1);
+            this.gs.topCard.push(card); player.hasPlayed = true;
+            this.updatePower(player);
+            this.gs.currentRoundPlays.push({ playerId: player.id, playerName: player.name, card, power: card.power });
+            this.broadcastLog(`👤 ${player.name} menjatuhkan ${card.name} - Power ${card.power}`);
+            this.checkWin(player); this.broadcastGameState();
+            setTimeout(() => this.checkPhase2End(), 500);
+        }
+    }
+
+    private handleDrawCardInternal(player: GamePlayer) {
+        this.clearAfkTimer(player);
+        if (this.dealCard(player)) {
+            player.mustDraw = false; player.hasPlayed = true;
+            this.gs.currentRoundPlays.push({ playerId: player.id, playerName: player.name, card: null, power: 0 });
+            this.broadcastLog(`👤 ${player.name} melakukan Draw Card`);
+        } else {
+            this.broadcastLog(`⚠️ ${player.name} gagal Draw - Draw Pile habis → Force Pick`);
+        }
+        this.broadcastGameState();
+        setTimeout(() => this.checkPhase2End(), 500);
+    }
+
+    private handleForcePickCardInternal(player: GamePlayer, cardId: string) {
+        this.clearAfkTimer(player);
+        const card = this.gs.topCard.find(c => c.id === cardId);
+        if (!card) return;
+        this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === cardId), 1);
+        player.hand.push(card);
+        player.mustForcePick = false;
+        player.hasPlayed = true;
+        this.updatePower(player);
+        this.gs.currentRoundPlays.push({ playerId: player.id, playerName: player.name, card, power: card.power, isForcePickPlay: true });
+        this.broadcastLog(`👤 ${player.name} Force Pick: ${card.name} (Power: ${card.power})`);
+
+        this.gs.forcePickPlayers.filter(p => p.isBot && !p.hasPlayed).forEach(bot => {
+            if (this.gs.topCard.length > 0) {
+                const chosen = [...this.gs.topCard].sort((a,b) => b.power - a.power)[0];
+                this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === chosen.id), 1);
+                bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
+                this.updatePower(bot);
+                this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: chosen, power: chosen.power, isForcePickPlay: true });
+                this.broadcastLog(`👤 ${bot.name} Force Pick: ${chosen.name} (Power: ${chosen.power})`);
+            }
+        });
+        this.gs.forcePickMode = false;
+        this.broadcastGameState();
+        setTimeout(() => { this.gs.isHandlingForcePick = false; if (!this.gs.isEndingRound) this.endRound(); }, 500);
+    }
+
+    handlePlayerAction(playerId: string, action: any) {
+        const player = this.gs.players.find(p => p.id === playerId);
+        if (!player || player.winner || this.gs.gameOver) return;
+
+        if (player.autoMode) {
+            player.disconnectedAt = undefined;
+            this.broadcastLog(`✅ ${player.name} kembali aktif`);
+        }
+
+        if (action.type === 'PLAY_CARD') {
+            if (player.hasPlayed || player.isProcessingAction) { this.sendToPlayer(playerId, { type:'ERROR', message:'Anda sudah bermain!' }); return; }
+            const card = player.hand.find(c => c.id === action.cardId);
+            if (!card) { this.sendToPlayer(playerId, { type:'ERROR', message:'Kartu tidak ditemukan!' }); return; }
+            
+            if (this.gs.phase === 1) {
+                if (this.gs.phase1Player !== playerId) { this.sendToPlayer(playerId, { type:'ERROR', message:'Bukan giliran Anda di Tahap 1!' }); return; }
+            }
+
+            if (this.gs.phase === 2) {
+                if (player.mustDraw) { this.sendToPlayer(playerId, { type:'ERROR', message:'Anda harus Draw Card!' }); return; }
+                if (card.province !== this.gs.currentProvince) { this.sendToPlayer(playerId, { type:'ERROR', message:`Kartu bukan dari provinsi ${this.gs.currentProvince}!` }); return; }
+                if (this.gs.topCard.some(c => c.id === card.id)) { this.sendToPlayer(playerId, { type:'ERROR', message:'Kartu duplikat!' }); return; }
+            }
+            this.handlePlayCardInternal(player, card);
+
+        } else if (action.type === 'DRAW_CARD') {
+            if (!player.mustDraw || player.hasPlayed) { this.sendToPlayer(playerId, { type:'ERROR', message:'Tidak perlu Draw Card!' }); return; }
+            this.handleDrawCardInternal(player);
+        } else if (action.type === 'FORCE_PICK_CARD') {
+            if (!this.gs.forcePickMode) { this.sendToPlayer(playerId, { type:'ERROR', message:'Tidak dalam mode Force Pick!' }); return; }
+            if (!this.gs.forcePickPlayers.some(p => p.id === playerId)) { this.sendToPlayer(playerId, { type:'ERROR', message:'Anda tidak perlu Force Pick!' }); return; }
+            if (player.hasPlayed) { this.sendToPlayer(playerId, { type:'ERROR', message:'Sudah bermain!' }); return; }
+            if (!this.gs.topCard.find(c => c.id === action.cardId)) { this.sendToPlayer(playerId, { type:'ERROR', message:'Kartu tidak ada di Top Card!' }); return; }
+            this.handleForcePickCardInternal(player, action.cardId);
+        }
+    }
+
+    handleSurrender(playerId: string) {
+        const player = this.gs.players.find(p => p.id === playerId);
+        if (!player || player.winner || player.isBot || this.gs.gameOver) return;
+
+        // Hitung rank berdasarkan siapa yang sudah menyerah/menang
+        // Tapi karena menyerah = kalah, rank dari belakang
+        // Sebelum player.winner = true, getActivePlayers() masih termasuk player ini
+        const currentActive = this.getActivePlayers(); // [pemain ini, dan yang lain]
+        player.rank = currentActive.length; // pemain ini dapat rank = jumlah orang yang aktif saat ini
+        player.winner = true;
+        this.gs.winners.push(player);
+
+        // Kartu player yang menyerah masuk ke discardPile
+        this.gs.discardPile.push(...player.hand);
+        this.broadcastLog(`🏳️ ${player.name} menyerah! (Peringkat ${player.rank})`);
+        player.hand = [];
+        player.totalPower = 0;
+        player.hasPlayed = true;
+
+        this.broadcastGameState();
+
+        // Cek apakah game harus berakhir
+        const remaining = this.getActivePlayers();
+        if (remaining.length <= 1) {
+            if (remaining.length === 1) {
+                const lastOne = remaining[0];
+                const totalPlayers = this.gs.players.length;
+                const allRanks = Array.from({length: totalPlayers}, (_, i) => i + 1);
+                const takenRanksAfterSurrender = this.gs.winners.map(w => w.rank);
+                lastOne.rank = allRanks.find(r => !takenRanksAfterSurrender.includes(r)) || 0;
+                lastOne.winner = true;
+                this.gs.winners.push(lastOne);
+                this.broadcastLog(`🏆 ${lastOne.name} menang sebagai Peringkat ${lastOne.rank}!`);
+            }
+            setTimeout(() => this.endGame(), 1000);
+        } else {
+            // Game masih berlanjut, pastikan ronde/fase lanjut
+            if (this.gs.phase === 2 && !this.gs.isHandlingForcePick && !this.gs.isEndingRound) {
+                setTimeout(() => this.checkPhase2End(), 500);
+            } else if (this.gs.phase === 1 && this.gs.phase1Player === playerId) {
+                // Jika yang menyerah adalah phase1Player, lanjutkan ke system play
+                this.gs.phase1Player = null;
+                setTimeout(() => this.systemPlayPhase1(), 500);
+            }
+        }
+    }
+    private endRound() {
+        if (this.gs.isEndingRound) return;
+        this.gs.isEndingRound = true;
+        this.clearAllAfkTimers();
+        this.gs.roundHistory.push({ round: this.gs.round, plays: [...this.gs.currentRoundPlays] });
+        this.broadcastLog(`🏁 Ronde ${this.gs.round} selesai`);
+
+        // Tunggu 1500ms agar kartu top card masih terlihat sebelum hilang dengan animasi
+        setTimeout(() => {
+            this.gs.discardPile.push(...this.gs.topCard);
+            this.gs.topCard = []; this.gs.currentProvince = null;
+            this.gs.forcePickMode = false; this.gs.forcePickPlayers = [];
+            this.broadcastGameState(); // ← trigger zoom-out di client
+
+            const activePlayers = this.getActivePlayers();
+            if (activePlayers.length === 0) {
+                setTimeout(() => { this.gs.isEndingRound = false; this.endGame(); }, 1000); return;
+            }
+            if (activePlayers.length === 1) {
+                const loser = activePlayers[0];
+                loser.rank = this.gs.winners.length + 1; loser.winner = true;
+                this.gs.winners.push(loser);
+                this.broadcastLog(`💀 ${loser.name} mendapat peringkat terakhir`);
+                setTimeout(() => { this.gs.isEndingRound = false; this.endGame(); }, 1000); return;
+            }
+            this.gs.round++;
+            this.broadcastLog(`🎮 === RONDE ${this.gs.round} DIMULAI ===`);
+            setTimeout(() => {
+                this.gs.isEndingRound = false; this.gs.isHandlingForcePick = false;
+                this.gs.forcePickProcessing = false; this.startPhase1();
+            }, 1500);
+        }, 1500);
+    }
+
+    private endGame() {
+        this.gs.gameOver = true;
+        this.clearAllAfkTimers();
+        this.gs.players.filter(p => !p.winner).forEach((p, i) => { p.rank = this.gs.winners.length + i + 1; });
+        this.broadcastToAll({
+            type: 'GAME_OVER',
+            players: this.gs.players.map(p => ({ name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot }))
+        });
+        // Beritahu matchmaking: game selesai, room bisa di-cleanup
+        if (this.onGameOver) setTimeout(() => this.onGameOver!(), 2000);
+    }
+
+    // Dipanggil ketika player secara eksplisit menekan "Kembali ke Home".
+    // Jika semua pemain manusia sudah meninggalkan match, langsung cleanup.
+    markPlayerLeft(playerId: string): boolean {
+        const player = this.gs.players.find(p => p.id === playerId);
+        if (!player || player.isBot) return false;
+        player.leftMatch = true;
+
+        const humans = this.gs.players.filter(p => !p.isBot);
+        const leftCount = humans.filter(p => p.leftMatch).length;
+        console.log(`🚪 ${player.name} keluar (${leftCount}/${humans.length} manusia pergi)`);
+
+        if (leftCount >= humans.length) {
+            this.cleanupMatch();
+            return true; // sinyal ke MatchmakingQueue untuk set status 'finished'
+        }
+        return false;
+    }
+
+    // Dipanggil ketika semua pemain manusia sudah pergi (tidak ada yang menonton).
+    // Hentikan semua timer dan tandai game selesai tanpa broadcast.
+    cleanupMatch() {
+        if (this.gs.gameOver) return;
+        this.gs.gameOver = true;
+        this.clearAllAfkTimers();
+        console.log(`🧹 Match ${this.roomId} dibersihkan (semua pemain manusia telah pergi)`);
+    }
+
+    getFullState() {
+        return {
+            round: this.gs.round, phase: this.gs.phase, phase1Player: this.gs.phase1Player,
+            currentProvince: this.gs.currentProvince, topCard: this.gs.topCard,
+            drawPile: this.gs.drawPile.map(c => ({ id: c.id })),
+            discardPile: this.gs.discardPile.map(c => ({ id: c.id })),
+            forcePickMode: this.gs.forcePickMode,
+            forcePickPlayers: this.gs.forcePickPlayers.map(p => ({ id: p.id })),
+            forcePickProcessing: this.gs.forcePickProcessing,
+            isHandlingForcePick: this.gs.isHandlingForcePick,
+            isEndingRound: this.gs.isEndingRound,
+            players: this.gs.players.map(p => ({
+                id: p.id, name: p.name, isBot: p.isBot, hand: p.hand,
+                totalPower: p.totalPower, hasPlayed: p.hasPlayed, mustDraw: p.mustDraw,
+                mustForcePick: p.mustForcePick, freed: p.freed, winner: p.winner,
+                rank: p.rank, isProcessingAction: p.isProcessingAction,
+                autoMode: p.autoMode,
+                disconnectedAt: p.disconnectedAt
+            })),
+            roundHistory: this.gs.roundHistory,
+            winners: this.gs.winners.map(p => ({ id: p.id, name: p.name, rank: p.rank })),
+            gameOver: this.gs.gameOver
+        };
+    }
+
+    broadcastGameState() {
+        const state = this.getFullState();
+        this.gs.players.forEach(p => {
+            if (!p.isBot && p.socket) {
+                try { p.socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state })); } catch(e) {}
+            }
+        });
+    }
+
+    private broadcastLog(message: string) {
+        console.log(`📝 LOG: ${message}`);
+        this.broadcastToAll({ type: 'LOG', message });
+    }
+
+    private sendToPlayer(playerId: string, message: any) {
+        const p = this.gs.players.find(p => p.id === playerId);
+        if (p && !p.isBot && p.socket) { try { p.socket.send(JSON.stringify(message)); } catch(e) {} }
+    }
+
+    broadcastToAll(message: any) {
+        this.gs.players.forEach(p => {
+            if (!p.isBot && p.socket) { try { p.socket.send(JSON.stringify(message)); } catch(e) {} }
+        });
+    }
+
+    updatePlayerSocket(playerId: string, socket: WebSocket) {
+        const p = this.gs.players.find(p => p.id === playerId);
+        if (p) { p.socket = socket; console.log(`🔄 Socket updated: ${p.name}`); }
+    }
+
+    getPlayerById(playerId: string): GamePlayer | undefined {
+        return this.gs.players.find(p => p.id === playerId);
+    }
+
+    setPlayerAutoMode(playerId: string, enabled: boolean) {
+        const player = this.gs.players.find(p => p.id === playerId);
+        if (!player || player.isBot || player.winner) return;
+        
+        player.autoMode = enabled;
+        
+        if (enabled) {
+            player.disconnectedAt = Date.now();
+            console.log(`👤 AUTO-MODE ON: ${player.name}`);
+            this.broadcastLog(`👤 ${player.name} disconnect - mode otomatis aktif`);
+            // Jalankan aksi otomatis jika sedang menunggu aksi player ini
+            this.runAutoAction(player);
+        } else {
+            player.disconnectedAt = undefined;
+            console.log(`👤 AUTO-MODE OFF: ${player.name}`);
+            this.broadcastLog(`✅ ${player.name} kembali ke pertandingan`);
+        }
+        this.broadcastGameState();
+    }
+
+    private runAutoAction(player: GamePlayer) {
+        if (!player.autoMode || player.hasPlayed || player.winner) return;
+        
+        const delay = 3000; // 3 detik sebelum aksi otomatis
+        
+        setTimeout(() => {
+            if (!player.autoMode || player.hasPlayed || player.winner) return;
+            
+            // Auto Phase 1
+            if (this.gs.phase === 1 && this.gs.phase1Player === player.id && !player.hasPlayed) {
+                if (player.hand.length > 0) {
+                    const card = [...player.hand].sort((a, b) => a.power - b.power)[0];
+                    this.broadcastLog(`👤 AUTO: ${player.name} menjatuhkan ${card.name}`);
+                    this.handlePlayCardInternal(player, card);
+                }
+                return;
+            }
+
+            // Auto Phase 2 - Draw Card
+            if (this.gs.phase === 2 && player.mustDraw && !player.hasPlayed) {
+                this.broadcastLog(`👤 AUTO: ${player.name} Draw Card`);
+                this.handleDrawCardInternal(player);
+                return;
+            }
+
+            // Auto Phase 2 - Play Card
+            if (this.gs.phase === 2 && !player.hasPlayed && !player.mustDraw && !player.mustForcePick) {
+                const matching = player.hand.filter(c => c.province === this.gs.currentProvince);
+                if (matching.length > 0) {
+                    const card = matching.sort((a, b) => a.power - b.power)[0];
+                    this.broadcastLog(`👤 AUTO: ${player.name} menjatuhkan ${card.name}`);
+                    this.handlePlayCardInternal(player, card);
+                }
+                return;
+            }
+
+            // Auto Force Pick
+            if (this.gs.phase === 2 && player.mustForcePick && !player.hasPlayed && this.gs.forcePickMode) {
+                if (this.gs.topCard.length > 0) {
+                    const card = [...this.gs.topCard].sort((a, b) => b.power - a.power)[0];
+                    this.broadcastLog(`👤 AUTO: ${player.name} Force Pick ${card.name}`);
+                    this.handleForcePickCardInternal(player, card.id);
+                }
+                return;
+            }
+            
+        }, delay);
+    }
+}
+
+interface Player {
+    id: string;
+    name: string;
+    socket: WebSocket;
+    joinTime: number;
+    timeoutId?: number;
+    userUid: string;
+}
+
+interface GameRoom {
+    id: string;
+    players: Player[];
+    bots: number;
+    status: 'starting' | 'playing' | 'finished';
+    gameEngine: GameEngine;
+    createdAt: number;
+}
+
+class MatchmakingQueue {
+    private queue: Player[] = [];
+    private rooms: Map<string, GameRoom> = new Map();
+    private readonly MATCH_SIZE = 4;
+    private readonly WAIT_TIMEOUT = 30000;
+
+    addPlayer(player: Player) {
+        console.log(`✅ ${player.name} masuk antrian. Total: ${this.queue.length + 1}`);
+        this.queue.push(player);
+        this.queue.forEach(p => {
+            try { p.socket.send(JSON.stringify({ type: 'QUEUE_STATUS', message: `Mencari lawan... (${this.queue.length}/4)` })); } catch(e) {}
+        });
+        this.checkAndCreateMatch();
+    }
+
+    private checkAndCreateMatch() {
+        if (this.queue.length >= this.MATCH_SIZE) {
+            const players = this.queue.splice(0, this.MATCH_SIZE);
+            players.forEach(p => {
+                if (p.timeoutId) clearTimeout(p.timeoutId);
+                try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: this.MATCH_SIZE, bots: 0 })); } catch(e) {}
+            });
+            this.createMatch(players, 0);
+        } else if (this.queue.length > 0 && !this.queue[0].timeoutId) {
+            this.queue[0].timeoutId = setTimeout(() => this.handleTimeout(), this.WAIT_TIMEOUT) as unknown as number;
+        }
+    }
+
+    private handleTimeout() {
+        if (this.queue.length === 0) return;
+        const waitingPlayers = this.queue.splice(0, this.queue.length);
+        const botsNeeded = this.MATCH_SIZE - waitingPlayers.length;
+        waitingPlayers.forEach(p => {
+            if (p.timeoutId) clearTimeout(p.timeoutId);
+            try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: waitingPlayers.length, bots: botsNeeded })); } catch(e) {}
+        });
+        this.createMatch(waitingPlayers, botsNeeded);
+    }
+
+    private createMatch(players: Player[], botCount: number) {
+        const roomId = `room_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+        const gameEngine = new GameEngine(roomId);
+        players.forEach(p => gameEngine.addPlayer({ 
+            id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid 
+        }));
+        for (let i = 0; i < botCount; i++) gameEngine.addBot(GameEngine.pickBotName());
+
+        const room: GameRoom = { id: roomId, players, bots: botCount, status: 'starting', gameEngine, createdAt: Date.now() };
+        this.rooms.set(roomId, room);
+
+        // Callback: tandai room finished saat game over
+        gameEngine.onGameOver = () => {
+            room.status = 'finished';
+            console.log(`🏁 Room ${roomId} selesai - akan di-cleanup dalam 5 menit`);
+        };
+
+        setTimeout(() => {
+            room.status = 'playing';
+            gameEngine.startGame();
+            players.forEach(p => {
+                try { p.socket.send(JSON.stringify({ type: 'GAME_STARTED', roomId, playerId: p.id, state: gameEngine.getFullState() })); } catch(e) {}
+            });
+        }, 3000);
+    }
+
+    removePlayer(playerId: string) {
+        const idx = this.queue.findIndex(p => p.id === playerId);
+        if (idx !== -1) {
+            const p = this.queue[idx];
+            if (p.timeoutId) clearTimeout(p.timeoutId);
+            this.queue.splice(idx, 1);
+        }
+    }
+
+    getRoom(roomId: string) { return this.rooms.get(roomId); }
+
+    rejoinRoom(roomId: string, playerId: string, playerName: string, userUid: string, socket: WebSocket): boolean {
+        const room = this.rooms.get(roomId);
+        if (!room || room.status !== 'playing') return false;
+        
+        // Validasi: pastikan userUid cocok dengan player yang punya playerId ini
+        const gamePlayer = room.gameEngine.getPlayerById(playerId);
+        if (!gamePlayer) return false;
+        if (gamePlayer.userUid && gamePlayer.userUid !== userUid) {
+            console.log(`🚫 REJOIN DITOLAK: uid tidak cocok. Expected ${gamePlayer.userUid}, got ${userUid}`);
+            return false;
+        }
+        
+        room.gameEngine.updatePlayerSocket(playerId, socket);
+        const rp = room.players.find(p => p.id === playerId);
+        if (rp) rp.socket = socket;
+        return true;
+    }
+
+    // Cleanup HANYA room yang sudah 'finished' dan sudah 5 menit
+    cleanupFinishedRooms() {
+        const now = Date.now();
+        const MAX_AGE = 5 * 60 * 1000;
+        this.rooms.forEach((room, roomId) => {
+            if (room.status === 'playing') return; // JANGAN hapus yang masih main!
+            if (room.status === 'finished' && (now - room.createdAt) > MAX_AGE) {
+                console.log(`🗑️ Cleanup finished room ${roomId}`);
+                this.rooms.delete(roomId);
+            }
+        });
+    }
+
+    getStats() {
+        const playing = [...this.rooms.values()].filter(r => r.status === 'playing').length;
+        const finished = [...this.rooms.values()].filter(r => r.status === 'finished').length;
+        return { waiting: this.queue.length, activeRooms: playing, finishedRooms: finished, totalCards: ALL_CARDS.length };
+    }
+
+    setPlayerAutoModeInAllRooms(playerId: string, enabled: boolean) {
+        this.rooms.forEach((room) => {
+            if (room.status === 'playing') {
+                room.gameEngine.setPlayerAutoMode(playerId, enabled);
+            }
+        });
+    }
+}
+
+const matchmaking = new MatchmakingQueue();
+setInterval(() => matchmaking.cleanupFinishedRooms(), 60000);
+
+console.log(`🎮 Card Game Nusantara Server v2`);
+console.log(`📦 Total kartu: ${ALL_CARDS.length} (${ALL_PROVINCES.length} provinsi × 5)`);
+
+Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
+    const url = new URL(req.url);
+
+    if (url.pathname === "/stats") return Response.json(matchmaking.getStats());
+    if (url.pathname === "/health") return new Response("OK", { status: 200 });
+
+    if (req.headers.get("upgrade") === "websocket") {
+        const { socket, response } = Deno.upgradeWebSocket(req);
+        let currentPlayer: Player | null = null;
+
+        socket.onopen = () => console.log("🔌 New connection");
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log(`📨 [${currentPlayer?.name || 'unknown'}] ${data.type}`);
+
+                switch (data.type) {
+                    case 'JOIN_MATCHMAKING':
+                        currentPlayer = {
+                            id: `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+                            name: data.playerName || `Player_${Math.floor(Math.random()*9999)}`,
+                            socket, joinTime: Date.now(),
+                            userUid: data.userUid || ''
+                        };
+                        matchmaking.addPlayer(currentPlayer);
+                        break;
+
+                    case 'LEAVE_QUEUE':
+                        if (currentPlayer) matchmaking.removePlayer(currentPlayer.id);
+                        break;
+
+                    case 'PLAY_CARD':
+                    case 'DRAW_CARD':
+                    case 'FORCE_PICK_CARD':
+                        if (currentPlayer && data.roomId) {
+                            const room = matchmaking.getRoom(data.roomId);
+                            if (room) room.gameEngine.handlePlayerAction(currentPlayer.id, data);
+                        }
+                        break;
+
+                    case 'SET_AUTO_MODE':
+                        if (currentPlayer && data.roomId) {
+                            const room = matchmaking.getRoom(data.roomId);
+                            if (room) {
+                                room.gameEngine.setPlayerAutoMode(currentPlayer.id, data.enabled);
+                            }
+                        }
+                        break;
+
+                    case 'PLAYER_ACTIVE':
+                        // Player kembali aktif, matikan auto mode
+                        if (currentPlayer && data.roomId) {
+                            const room = matchmaking.getRoom(data.roomId);
+                            if (room) {
+                                room.gameEngine.setPlayerAutoMode(currentPlayer.id, false);
+                                const state = room.gameEngine.getFullState();
+                                try { socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state })); } catch(e) {}
+                            }
+                        }
+                        break;
+
+                    case 'SURRENDER':
+                        if (currentPlayer && data.roomId) {
+                            const room = matchmaking.getRoom(data.roomId);
+                            if (room) room.gameEngine.handleSurrender(currentPlayer.id);
+                        }
+                        break;
+
+                    case 'LEAVE_MATCH':
+                        // Player secara eksplisit memilih "Kembali ke Home"
+                        if (currentPlayer && data.roomId) {
+                            const room = matchmaking.getRoom(data.roomId);
+                            if (room && room.status === 'playing') {
+                                const allLeft = room.gameEngine.markPlayerLeft(currentPlayer.id);
+                                if (allLeft) {
+                                    room.status = 'finished';
+                                    console.log(`🏁 Room ${data.roomId} selesai - semua pemain manusia telah pergi`);
+                                }
+                            }
+                        }
+                        break;
+
+                    case 'PONG':
+                        // Keepalive dari client — tidak ada aksi, abaikan diam-diam
+                        break;
+
+                    case 'REJOIN_ROOM':
+                        if (data.roomId && data.playerId) {
+                            const success = matchmaking.rejoinRoom(
+                                data.roomId, data.playerId, data.playerName || 'Player', 
+                                data.userUid || '',
+                                socket
+                            );
+                            if (success) {
+                                currentPlayer = { id: data.playerId, name: data.playerName || 'Player', socket, joinTime: Date.now(), userUid: data.userUid || '' };
+                                const room = matchmaking.getRoom(data.roomId);
+                                if (room) {
+                                    room.gameEngine.setPlayerAutoMode(data.playerId, false);
+                                    socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: room.gameEngine.getFullState() }));
+                                    console.log(`🔄 ${data.playerId} rejoined ${data.roomId}`);
+                                }
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan, sudah selesai, atau akun tidak cocok.' }));
+                            }
+                        }
+                        break;
+
+                    default:
+                        console.log(`❓ Unknown: ${data.type}`);
+                }
+            } catch (error) {
+                console.error("❌ Error:", error);
+            }
+        };
+
+        socket.onclose = () => {
+            console.log(`🔌 Disconnected: ${currentPlayer?.name || 'unknown'}`);
+            if (currentPlayer) {
+                matchmaking.removePlayer(currentPlayer.id);
+                matchmaking.setPlayerAutoModeInAllRooms(currentPlayer.id, true);
+            }
+        };
+
+        socket.onerror = (e) => console.error("❌ WS Error:", e);
+
+        return response;
+    }
+
+    return new Response(
+        `🎮 Card Game Nusantara Server v2\nStats: /stats\nHealth: /health\nTotal Kartu: ${ALL_CARDS.length}`,
+        { status: 200, headers: { "Content-Type": "text/plain" } }
+    );
+});
