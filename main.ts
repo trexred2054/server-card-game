@@ -3,6 +3,13 @@
 // main.ts - COMPLETE VERSION WITH ALL FIXES
 // ================================================
 
+// Deno global type declaration (for non-Deno IDE/LSP compatibility)
+declare const Deno: {
+    env: { get(key: string): string | undefined };
+    serve(options: { port: number }, handler: (req: Request) => Response | Promise<Response>): void;
+    upgradeWebSocket(req: Request): { socket: WebSocket; response: Response };
+};
+
 interface Card {
     id: string; name: string; type: string;
     rarity: string; power: number; province: string;
@@ -15,9 +22,11 @@ interface GamePlayer {
     winner: boolean; rank: number; isProcessingAction: boolean;
     afkTimer?: number;
     autoMode: boolean;
+    autoModeTimerId?: number;
     disconnectedAt?: number;
     userUid: string;
     leftMatch: boolean;
+    statsSaved?: boolean;
 }
 
 interface RoundPlay { playerId: string; playerName: string; card: Card | null; power: number; isForcePickPlay?: boolean; }
@@ -299,6 +308,160 @@ ALL_PROVINCES.forEach(province => {
     });
 });
 
+// =============================================
+// FIREBASE REST API CLIENT (no external deps)
+// =============================================
+const FB_DB_URL = Deno.env.get("FIREBASE_DATABASE_URL")
+    || "https://rex-server-8a176-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+// deno-lint-ignore no-explicit-any
+let fbServiceAccount: any = null;
+let fbTokenCache: { token: string; expiry: number } | null = null;
+
+(function loadServiceAccount() {
+    const raw = Deno.env.get("FIREBASE_SERVICE_ACCOUNT");
+    if (!raw) { console.warn("⚠️  FIREBASE_SERVICE_ACCOUNT tidak diset — rank disimpan oleh client sebagai fallback"); return; }
+    try { fbServiceAccount = JSON.parse(raw); console.log("✅ Firebase service account loaded"); }
+    catch (e) { console.error("❌ FIREBASE_SERVICE_ACCOUNT JSON invalid:", e); }
+})();
+
+async function fbGetToken(): Promise<string | null> {
+    if (!fbServiceAccount) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (fbTokenCache && fbTokenCache.expiry > now + 60) return fbTokenCache.token;
+    try {
+        const b64url = (obj: object) =>
+            btoa(JSON.stringify(obj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+        const header  = { alg: "RS256", typ: "JWT" };
+        const payload = {
+            iss: fbServiceAccount.client_email, sub: fbServiceAccount.client_email,
+            aud: "https://oauth2.googleapis.com/token",
+            iat: now, exp: now + 3600,
+            scope: "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email"
+        };
+        const input   = `${b64url(header)}.${b64url(payload)}`;
+        const pemBody = fbServiceAccount.private_key
+            .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+            .replace(/-----END PRIVATE KEY-----/g, "")
+            .replace(/\n/g, "");
+        const der = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
+        const key = await crypto.subtle.importKey(
+            "pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]
+        );
+        const sig    = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(input));
+        const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
+            .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+        const jwt    = `${input}.${sigB64}`;
+        const resp   = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
+        });
+        const json = await resp.json();
+        if (!json.access_token) throw new Error(JSON.stringify(json));
+        fbTokenCache = { token: json.access_token, expiry: now + 3590 };
+        return fbTokenCache.token;
+    } catch (e) { console.error("❌ fbGetToken error:", e); return null; }
+}
+
+// deno-lint-ignore no-explicit-any
+async function fbTransaction(path: string, updateFn: (cur: any) => any): Promise<boolean> {
+    const token = await fbGetToken();
+    if (!token) return false;
+    const url = `${FB_DB_URL}${path}.json`;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const getRes = await fetch(url, { headers: { Authorization: `Bearer ${token}`, "X-Firebase-ETag": "true" } });
+        const etag   = getRes.headers.get("ETag") ?? "*";
+        const cur    = await getRes.json();
+        const next   = updateFn(cur === null ? undefined : cur);
+        if (next === undefined) return false;
+        const putRes = await fetch(url, {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "if-match": etag },
+            body: JSON.stringify(next)
+        });
+        if (putRes.ok)          return true;
+        if (putRes.status === 412) continue; // conflict → retry
+        const errText = await putRes.text().catch(() => "");
+        console.error(`❌ fbTransaction PUT failed ${putRes.status}: ${errText}`);
+        return false;
+    }
+    return false;
+}
+
+async function fbPush(path: string, value: unknown): Promise<boolean> {
+    const token = await fbGetToken();
+    if (!token) return false;
+    const res = await fetch(`${FB_DB_URL}${path}.json`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(value)
+    });
+    return res.ok;
+}
+
+// =============================================
+// RANK SYSTEM (SERVER-SIDE)
+// =============================================
+const RANKS = [
+    "Bronze III", "Bronze II", "Bronze I",
+    "Silver III", "Silver II", "Silver I",
+    "Gold III",   "Gold II",   "Gold I",
+    "Diamond III","Diamond II","Diamond I",
+    "Platinum III","Platinum II","Platinum I",
+    "Platinum MAX"
+];
+const RANK_CHANGES: Record<string, number[]> = {
+    Bronze:   [20, 10,  5,  -5],
+    Silver:   [16,  8,  4, -12],
+    Gold:     [12,  6,  3, -20],
+    Diamond:  [ 8,  4,  2, -28],
+    Platinum: [ 5,  2,  1, -35],
+};
+function rankTier(name: string): string {
+    if (name === "Platinum MAX") return "Platinum";
+    return ["Bronze","Silver","Gold","Diamond","Platinum"].find(t => name.startsWith(t)) || "Bronze";
+}
+function calcRank(name: string, pts: number, pos: number): { name: string; pts: number } {
+    const change = RANK_CHANGES[rankTier(name)][pos - 1];
+    const idx    = RANKS.indexOf(name);
+    if (name === "Platinum MAX") return { name: "Platinum MAX", pts: Math.max(0, pts + change) };
+    let np = pts + change, nn = name;
+    if (np >= 100 && idx < RANKS.length - 1) { nn = RANKS[idx + 1]; np -= 100; }
+    else if (np < 0) { if (name === "Bronze III") np = 0; else { nn = RANKS[idx - 1]; np = Math.max(0, 100 + np); } }
+    return { name: nn, pts: np };
+}
+
+async function savePlayerStats(userUid: string, position: number): Promise<boolean> {
+    if (!fbServiceAccount || !userUid || userUid === "BOT") return false;
+    try {
+        const base = `/users/${userUid}`;
+        const [statsOk, histOk, rankOk] = await Promise.all([
+            fbTransaction(`${base}/stats`, (s) => {
+                if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
+                s.totalMatches = (s.totalMatches || 0) + 1;
+                s[`rank${position}`] = (s[`rank${position}`] || 0) + 1;
+                return s;
+            }),
+            fbPush(`${base}/history`, { rank: position, date: Date.now() }),
+            fbTransaction(`${base}/rankData`, (r) => {
+                if (!r) r = { rankName: "Bronze III", points: 0, peakRank: "Bronze III", peakRankIndex: 0 };
+                const res  = calcRank(r.rankName || "Bronze III", r.points || 0, position);
+                r.rankName = res.name; r.points = res.pts;
+                const ni   = RANKS.indexOf(res.name);
+                if (ni > (r.peakRankIndex || 0)) { r.peakRank = res.name; r.peakRankIndex = ni; }
+                return r;
+            })
+        ]);
+        const ok = statsOk && histOk && rankOk;
+        console.log(`${ok ? "✅" : "⚠️ "} savePlayerStats uid=${userUid} pos=${position} stats=${statsOk} hist=${histOk} rank=${rankOk}`);
+        return ok;
+    } catch (e) {
+        console.error(`❌ savePlayerStats uid=${userUid}:`, e);
+        return false;
+    }
+}
+
 class GameEngine {
     roomId: string;
     onGameOver?: () => void;
@@ -334,7 +497,7 @@ class GameEngine {
             hand: [], totalPower: 0, hasPlayed: false, mustDraw: false,
             mustForcePick: false, freed: false, winner: false, rank: 0,
             isProcessingAction: false, autoMode: false, userUid: p.userUid || '',
-            leftMatch: false
+            leftMatch: false, statsSaved: false
         };
         this.gs.players.push(player);
     }
@@ -435,7 +598,7 @@ class GameEngine {
     }
 
     private startPhase1() {
-        if (this.gs.isStartingPhase) return;
+        if (this.gs.gameOver || this.gs.isStartingPhase) return;
         this.gs.isStartingPhase = true;
         this.gs.phase = 1;
         this.gs.topCard = []; this.gs.currentProvince = null;
@@ -528,6 +691,7 @@ class GameEngine {
     }
 
     private startPhase2() {
+        if (this.gs.gameOver) return;
         this.gs.phase = 2;
         this.gs.forcePickProcessing = false;
         this.gs.isHandlingForcePick = false;
@@ -598,9 +762,9 @@ class GameEngine {
         }
     }
     private checkPhase2End() {
-        if (this.gs.isHandlingForcePick || this.gs.isEndingRound) return;
+        if (this.gs.gameOver || this.gs.isHandlingForcePick || this.gs.isEndingRound) return;
         const human = this.gs.players.find(p => !p.isBot && !p.winner);
-        if (human && !human.hasPlayed && !human.mustForcePick) return;
+        if (human && !human.hasPlayed && !human.mustForcePick && !human.autoMode) return;
         const activePlayers = this.getActivePlayers();
         if (!activePlayers.every(p => p.hasPlayed || p.mustForcePick)) return;
         const fpPlayers = activePlayers.filter(p => p.mustForcePick && !p.hasPlayed);
@@ -774,6 +938,22 @@ class GameEngine {
         player.winner = true;
         this.gs.winners.push(player);
 
+        // Simpan stats langsung saat menyerah — socket masih terbuka, sehingga
+        // SAVE_STATS_CLIENT bisa dikirim ke client jika server-save gagal.
+        // Flag statsSaved = true (optimistic) mencegah double-save di endGame().
+        if (player.userUid && player.userUid !== "BOT") {
+            player.statsSaved = true;
+            const _p = player;
+            savePlayerStats(_p.userUid, _p.rank).then(ok => {
+                if (!ok) {
+                    _p.statsSaved = false;
+                    if (_p.socket && _p.socket.readyState === 1) {
+                        try { _p.socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT' })); } catch (_) { /* noop */ }
+                    }
+                }
+            });
+        }
+
         // Kartu player yang menyerah masuk ke discardPile
         this.gs.discardPile.push(...player.hand);
         this.broadcastLog(`🏳️ ${player.name} menyerah! (Peringkat ${player.rank})`);
@@ -850,6 +1030,20 @@ class GameEngine {
             type: 'GAME_OVER',
             players: this.gs.players.map(p => ({ id: p.id, name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot }))
         });
+
+        // Server-side: simpan stats + rank setiap pemain manusia
+        // Jika gagal, kirim SAVE_STATS_CLIENT agar client menjadi fallback
+        this.gs.players
+            .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved)
+            .forEach(p => {
+                const sock = p.socket;
+                savePlayerStats(p.userUid, p.rank).then(ok => {
+                    if (!ok && sock && sock.readyState === 1 /* OPEN */) {
+                        try { sock.send(JSON.stringify({ type: "SAVE_STATS_CLIENT" })); } catch (_) { /* noop */ }
+                    }
+                });
+            });
+
         // Beritahu matchmaking: game selesai, room bisa di-cleanup
         if (this.onGameOver) setTimeout(() => this.onGameOver!(), 2000);
     }
@@ -943,16 +1137,20 @@ class GameEngine {
     setPlayerAutoMode(playerId: string, enabled: boolean) {
         const player = this.gs.players.find(p => p.id === playerId);
         if (!player || player.isBot || player.winner) return;
-        
+
         player.autoMode = enabled;
-        
+
         if (enabled) {
             player.disconnectedAt = Date.now();
             console.log(`👤 AUTO-MODE ON: ${player.name}`);
             this.broadcastLog(`👤 ${player.name} disconnect - mode otomatis aktif`);
-            // Jalankan aksi otomatis jika sedang menunggu aksi player ini
             this.runAutoAction(player);
         } else {
+            // Batalkan timer auto-action yang mungkin masih pending
+            if (player.autoModeTimerId) {
+                clearTimeout(player.autoModeTimerId);
+                player.autoModeTimerId = undefined;
+            }
             player.disconnectedAt = undefined;
             console.log(`👤 AUTO-MODE OFF: ${player.name}`);
             this.broadcastLog(`✅ ${player.name} kembali ke pertandingan`);
@@ -961,13 +1159,17 @@ class GameEngine {
     }
 
     private runAutoAction(player: GamePlayer) {
-        if (!player.autoMode || player.hasPlayed || player.winner) return;
-        
-        const delay = 3000; // 3 detik sebelum aksi otomatis
-        
-        setTimeout(() => {
-            if (!player.autoMode || player.hasPlayed || player.winner) return;
-            
+        if (!player.autoMode || player.hasPlayed || player.winner || this.gs.gameOver) return;
+        // Batalkan timer sebelumnya agar tidak ada duplikasi
+        if (player.autoModeTimerId) {
+            clearTimeout(player.autoModeTimerId);
+            player.autoModeTimerId = undefined;
+        }
+        const delay = 3000;
+        player.autoModeTimerId = setTimeout(() => {
+            player.autoModeTimerId = undefined;
+            if (!player.autoMode || player.hasPlayed || player.winner || this.gs.gameOver) return;
+
             // Auto Phase 1
             if (this.gs.phase === 1 && this.gs.phase1Player === player.id && !player.hasPlayed) {
                 if (player.hand.length > 0) {
@@ -1005,8 +1207,7 @@ class GameEngine {
                 }
                 return;
             }
-            
-        }, delay);
+        }, delay) as unknown as number;
     }
 }
 
@@ -1026,6 +1227,7 @@ interface GameRoom {
     status: 'starting' | 'playing' | 'finished';
     gameEngine: GameEngine;
     createdAt: number;
+    finishedAt?: number;
 }
 
 class MatchmakingQueue {
@@ -1081,6 +1283,7 @@ class MatchmakingQueue {
         // Callback: tandai room finished saat game over
         gameEngine.onGameOver = () => {
             room.status = 'finished';
+            room.finishedAt = Date.now();
             console.log(`🏁 Room ${roomId} selesai - akan di-cleanup dalam 5 menit`);
         };
 
@@ -1106,8 +1309,9 @@ class MatchmakingQueue {
 
     rejoinRoom(roomId: string, playerId: string, playerName: string, userUid: string, socket: WebSocket): boolean {
         const room = this.rooms.get(roomId);
-        if (!room || room.status !== 'playing') return false;
-        
+        // Izinkan rejoin saat status 'starting' maupun 'playing'
+        if (!room || (room.status !== 'playing' && room.status !== 'starting')) return false;
+
         // Validasi: pastikan userUid cocok dengan player yang punya playerId ini
         const gamePlayer = room.gameEngine.getPlayerById(playerId);
         if (!gamePlayer) return false;
@@ -1115,20 +1319,24 @@ class MatchmakingQueue {
             console.log(`🚫 REJOIN DITOLAK: uid tidak cocok. Expected ${gamePlayer.userUid}, got ${userUid}`);
             return false;
         }
-        
+
+        // Bersihkan flag leftMatch agar tidak salah di-cleanup
+        gamePlayer.leftMatch = false;
+
         room.gameEngine.updatePlayerSocket(playerId, socket);
         const rp = room.players.find(p => p.id === playerId);
         if (rp) rp.socket = socket;
         return true;
     }
 
-    // Cleanup HANYA room yang sudah 'finished' dan sudah 5 menit
+    // Cleanup HANYA room yang sudah 'finished' dan sudah 5 menit sejak selesai
     cleanupFinishedRooms() {
         const now = Date.now();
         const MAX_AGE = 5 * 60 * 1000;
         this.rooms.forEach((room, roomId) => {
-            if (room.status === 'playing') return; // JANGAN hapus yang masih main!
-            if (room.status === 'finished' && (now - room.createdAt) > MAX_AGE) {
+            if (room.status === 'playing' || room.status === 'starting') return;
+            const finishedTime = room.finishedAt ?? room.createdAt;
+            if (room.status === 'finished' && (now - finishedTime) > MAX_AGE) {
                 console.log(`🗑️ Cleanup finished room ${roomId}`);
                 this.rooms.delete(roomId);
             }
@@ -1144,7 +1352,9 @@ class MatchmakingQueue {
     setPlayerAutoModeInAllRooms(playerId: string, enabled: boolean) {
         this.rooms.forEach((room) => {
             if (room.status === 'playing') {
-                room.gameEngine.setPlayerAutoMode(playerId, enabled);
+                // Validasi player benar-benar ada di room ini sebelum ubah auto mode
+                const gp = room.gameEngine.getPlayerById(playerId);
+                if (gp) room.gameEngine.setPlayerAutoMode(playerId, enabled);
             }
         });
     }
@@ -1233,6 +1443,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
                                 const allLeft = room.gameEngine.markPlayerLeft(currentPlayer.id);
                                 if (allLeft) {
                                     room.status = 'finished';
+                                    room.finishedAt = Date.now();
                                     console.log(`🏁 Room ${data.roomId} selesai - semua pemain manusia telah pergi`);
                                 }
                             }
@@ -1294,7 +1505,10 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
             console.log(`🔌 Disconnected: ${currentPlayer?.name || 'unknown'}`);
             if (currentPlayer) {
                 matchmaking.removePlayer(currentPlayer.id);
-                matchmaking.setPlayerAutoModeInAllRooms(currentPlayer.id, true);
+                // Tunda auto-mode 5 detik agar player punya waktu reconnect
+                setTimeout(() => {
+                    matchmaking.setPlayerAutoModeInAllRooms(currentPlayer!.id, true);
+                }, 5000);
             }
         };
 
