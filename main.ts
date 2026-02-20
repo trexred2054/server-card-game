@@ -848,7 +848,7 @@ class GameEngine {
         this.gs.players.filter(p => !p.winner).forEach((p, i) => { p.rank = this.gs.winners.length + i + 1; });
         this.broadcastToAll({
             type: 'GAME_OVER',
-            players: this.gs.players.map(p => ({ name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot }))
+            players: this.gs.players.map(p => ({ id: p.id, name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot }))
         });
         // Beritahu matchmaking: game selesai, room bisa di-cleanup
         if (this.onGameOver) setTimeout(() => this.onGameOver!(), 2000);
@@ -1268,7 +1268,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
                                         socket.send(JSON.stringify({
                                             type: 'GAME_OVER',
                                             players: finishedRoom.gameEngine.gs.players.map(p => ({
-                                                name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot
+                                                id: p.id, name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot
                                             }))
                                         }));
                                         console.log(`📤 GAME_OVER dikirim ulang ke ${data.playerId} (late rejoin - room sudah finished)`);
