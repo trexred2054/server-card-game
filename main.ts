@@ -899,7 +899,7 @@ class GameEngine {
         }
 
         if (action.type === 'PLAY_CARD') {
-            if (player.hasPlayed || player.isProcessingAction) { this.sendToPlayer(playerId, { type:'ERROR', message:'Anda sudah bermain!' }); return; }
+            if (player.hasPlayed || player.isProcessingAction) { return; } // silent ignore — race condition biasa
             const card = player.hand.find(c => c.id === action.cardId);
             if (!card) { this.sendToPlayer(playerId, { type:'ERROR', message:'Kartu tidak ditemukan!' }); return; }
             
@@ -915,12 +915,12 @@ class GameEngine {
             this.handlePlayCardInternal(player, card);
 
         } else if (action.type === 'DRAW_CARD') {
-            if (!player.mustDraw || player.hasPlayed) { this.sendToPlayer(playerId, { type:'ERROR', message:'Tidak perlu Draw Card!' }); return; }
+            if (!player.mustDraw || player.hasPlayed) { return; } // silent ignore
             this.handleDrawCardInternal(player);
         } else if (action.type === 'FORCE_PICK_CARD') {
-            if (!this.gs.forcePickMode) { this.sendToPlayer(playerId, { type:'ERROR', message:'Tidak dalam mode Force Pick!' }); return; }
-            if (!this.gs.forcePickPlayers.some(p => p.id === playerId)) { this.sendToPlayer(playerId, { type:'ERROR', message:'Anda tidak perlu Force Pick!' }); return; }
-            if (player.hasPlayed) { this.sendToPlayer(playerId, { type:'ERROR', message:'Sudah bermain!' }); return; }
+            if (!this.gs.forcePickMode) { return; } // silent ignore
+            if (!this.gs.forcePickPlayers.some(p => p.id === playerId)) { return; } // silent ignore
+            if (player.hasPlayed) { return; } // silent ignore
             if (!this.gs.topCard.find(c => c.id === action.cardId)) { this.sendToPlayer(playerId, { type:'ERROR', message:'Kartu tidak ada di Top Card!' }); return; }
             this.handleForcePickCardInternal(player, action.cardId);
         }
