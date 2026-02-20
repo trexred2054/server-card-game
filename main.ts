@@ -561,7 +561,7 @@ class GameEngine {
 
     private clearAllAfkTimers() { this.gs.players.forEach(p => this.clearAfkTimer(p)); }
 
-    private setAfkTimer(player: GamePlayer, action: () => void, delay = 30000) {
+    private setAfkTimer(player: GamePlayer, action: () => void, delay = 25000) {
         this.clearAfkTimer(player);
         if (player.isBot) return;
         player.afkTimer = setTimeout(() => {
