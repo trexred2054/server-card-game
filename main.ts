@@ -449,7 +449,11 @@ async function savePlayerStats(userUid: string, position: number): Promise<boole
                 const res  = calcRank(r.rankName || "Bronze III", r.points || 0, position);
                 r.rankName = res.name; r.points = res.pts;
                 const ni   = RANKS.indexOf(res.name);
-                if (ni > (r.peakRankIndex || 0)) { r.peakRank = res.name; r.peakRankIndex = ni; }
+                if (ni > (r.peakRankIndex || 0)) {
+                    r.peakRank = res.name; r.peakRankIndex = ni; r.peakRankPoints = res.pts;
+                } else if (res.name === r.peakRank && res.pts > (r.peakRankPoints || 0)) {
+                    r.peakRankPoints = res.pts;
+                }
                 return r;
             })
         ]);
