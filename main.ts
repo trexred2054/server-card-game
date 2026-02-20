@@ -436,25 +436,36 @@ async function savePlayerStats(userUid: string, position: number): Promise<boole
     if (!fbServiceAccount || !userUid || userUid === "BOT") return false;
     try {
         const base = `/users/${userUid}`;
-        const [statsOk, histOk, rankOk] = await Promise.all([
+        // RankData dulu agar bisa catat perubahan ke history
+        let _rankBefore = "Bronze III", _rankAfter = "Bronze III", _ptsChange = 0, _ptsBefore = 0, _ptsAfter = 0;
+        const rankOk = await fbTransaction(`${base}/rankData`, (r) => {
+            if (!r) r = { rankName: "Bronze III", points: 0, peakRank: "Bronze III", peakRankIndex: 0 };
+            _rankBefore = r.rankName || "Bronze III";
+            _ptsBefore  = r.points   || 0;
+            _ptsChange  = RANK_CHANGES[rankTier(_rankBefore)][position - 1];
+            const res   = calcRank(_rankBefore, _ptsBefore, position);
+            _rankAfter  = res.name;
+            _ptsAfter   = res.pts;
+            r.rankName  = res.name; r.points = res.pts;
+            const ni    = RANKS.indexOf(res.name);
+            if (ni > (r.peakRankIndex || 0)) {
+                r.peakRank = res.name; r.peakRankIndex = ni; r.peakRankPoints = res.pts;
+            } else if (res.name === r.peakRank && res.pts > (r.peakRankPoints || 0)) {
+                r.peakRankPoints = res.pts;
+            }
+            return r;
+        });
+        const [statsOk, histOk] = await Promise.all([
             fbTransaction(`${base}/stats`, (s) => {
                 if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
                 s.totalMatches = (s.totalMatches || 0) + 1;
                 s[`rank${position}`] = (s[`rank${position}`] || 0) + 1;
                 return s;
             }),
-            fbPush(`${base}/history`, { rank: position, date: Date.now() }),
-            fbTransaction(`${base}/rankData`, (r) => {
-                if (!r) r = { rankName: "Bronze III", points: 0, peakRank: "Bronze III", peakRankIndex: 0 };
-                const res  = calcRank(r.rankName || "Bronze III", r.points || 0, position);
-                r.rankName = res.name; r.points = res.pts;
-                const ni   = RANKS.indexOf(res.name);
-                if (ni > (r.peakRankIndex || 0)) {
-                    r.peakRank = res.name; r.peakRankIndex = ni; r.peakRankPoints = res.pts;
-                } else if (res.name === r.peakRank && res.pts > (r.peakRankPoints || 0)) {
-                    r.peakRankPoints = res.pts;
-                }
-                return r;
+            fbPush(`${base}/history`, {
+                rank: position, date: Date.now(),
+                rankBefore: _rankBefore, rankAfter: _rankAfter,
+                ptsBefore: _ptsBefore, ptsAfter: _ptsAfter, ptsChange: _ptsChange
             })
         ]);
         const ok = statsOk && histOk && rankOk;
@@ -656,6 +667,8 @@ class GameEngine {
                     this.botPlayPhase1(phase1Player);
             });
             this.broadcastGameState();
+            // Jika phase1Player sedang auto-mode (disconnect), trigger aksi cepat (3s bukan 30s)
+            if (phase1Player.autoMode) setTimeout(() => this.runAutoAction(phase1Player), 500);
         }
     }
 
@@ -727,6 +740,10 @@ class GameEngine {
         });
 
         this.broadcastGameState();
+        // Trigger aksi cepat untuk pemain yang sedang auto-mode (disconnect)
+        this.getActivePlayers()
+            .filter(p => !p.isBot && p.autoMode && !p.hasPlayed)
+            .forEach(p => setTimeout(() => this.runAutoAction(p), 500));
         setTimeout(() => this.botsPlayPhase2(), 1000);
     }
 
