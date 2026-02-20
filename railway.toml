@@ -1,0 +1,5 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "deno run --allow-net --allow-env main.ts"
