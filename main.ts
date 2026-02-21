@@ -548,10 +548,16 @@ class GameEngine {
     private checkWin(player: GamePlayer) {
         if (player.hand.length === 0 && !player.winner) {
             player.winner = true;
-            player.rank = this.gs.winners.length + 1;
+            // Cari rank TERBAIK (terkecil) yang belum dipakai.
+            // Penting: jika ada surrenderer yang sudah ambil rank besar (misal rank 4),
+            // pemain yang menang duluan tetap dapat rank 1, bukan winners.length+1.
+            const takenRanks = new Set(this.gs.winners.map(w => w.rank));
+            let rank = 1;
+            while (takenRanks.has(rank)) rank++;
+            player.rank = rank;
             this.gs.winners.push(player);
             const medals = ['🥇','🥈','🥉','🎖️'];
-            this.broadcastLog(`${medals[player.rank-1]} ${player.name} MENANG! Peringkat: ${player.rank}`);
+            this.broadcastLog(`${medals[player.rank-1] || '🏅'} ${player.name} MENANG! Peringkat: ${player.rank}`);
         }
     }
 
@@ -595,20 +601,33 @@ class GameEngine {
     startGame() {
         this.gs.drawPile = this.shuffle([...ALL_CARDS]);
         const usedIds = new Set<string>();
+
+        // Distribusi per pemain: 1 Legendary, 1 Epic, 3 Rare, 3 Uncommon, 2 Common
+        const DEAL_PLAN: { rarity: string; count: number }[] = [
+            { rarity: 'legendary', count: 1 },
+            { rarity: 'epic',      count: 1 },
+            { rarity: 'rare',      count: 3 },
+            { rarity: 'uncommon',  count: 3 },
+            { rarity: 'common',    count: 2 },
+        ];
+
         this.gs.players.forEach(player => {
-            for (let i = 0; i < 47; i++) {
-                for (let attempt = 0; attempt < 100; attempt++) {
-                    if (this.gs.drawPile.length === 0) break;
-                    const card = this.gs.drawPile.pop()!;
-                    if (!usedIds.has(card.id)) {
-                        player.hand.push(card); usedIds.add(card.id);
-                        this.updatePower(player); break;
-                    }
-                    this.gs.drawPile.unshift(card);
+            for (const slot of DEAL_PLAN) {
+                let dealt = 0;
+                // Cari kartu dari drawPile sesuai rarity
+                for (let attempt = 0; attempt < this.gs.drawPile.length * 2 && dealt < slot.count; attempt++) {
+                    const idx = this.gs.drawPile.findIndex(c => c.rarity === slot.rarity && !usedIds.has(c.id));
+                    if (idx === -1) break;
+                    const card = this.gs.drawPile.splice(idx, 1)[0];
+                    player.hand.push(card);
+                    usedIds.add(card.id);
+                    this.updatePower(player);
+                    dealt++;
                 }
             }
         });
-        this.broadcastLog(`🎮 Game dimulai! Setiap pemain mendapat 47 kartu.`);
+
+        this.broadcastLog(`🎮 Game dimulai! Setiap pemain mendapat 10 kartu (1L/1E/3R/3U/2C).`);
         setTimeout(() => this.startPhase1(), 500);
     }
 
@@ -767,19 +786,34 @@ class GameEngine {
                 this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: null, power: 0 });
                 this.broadcastLog(`👤 ${bot.name} melakukan Draw Card`);
             }
+            // Jika dealCard gagal, mustForcePick sudah di-set oleh dealCard → ditangani checkPhase2End
             this.broadcastGameState(); return;
         }
         const matching = bot.hand.filter(c => c.province === this.gs.currentProvince);
         if (matching.length > 0) {
-            const card = matching.sort((a,b) => a.power - b.power)[0];
-            if (this.gs.topCard.some(c => c.id === card.id)) return;
-            bot.hand.splice(bot.hand.findIndex(c => c.id === card.id), 1);
-            this.gs.topCard.push(card);
-            bot.hasPlayed = true;
-            this.updatePower(bot);
-            this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card, power: card.power });
-            this.checkWin(bot);
-            this.broadcastGameState();
+            // Cari kartu yang TIDAK duplikat di topCard (sorted asc power)
+            const playable = matching.sort((a,b) => a.power - b.power).filter(c => !this.gs.topCard.some(t => t.id === c.id));
+            if (playable.length > 0) {
+                const card = playable[0];
+                bot.hand.splice(bot.hand.findIndex(c => c.id === card.id), 1);
+                this.gs.topCard.push(card);
+                bot.hasPlayed = true;
+                this.updatePower(bot);
+                this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card, power: card.power });
+                this.checkWin(bot);
+                this.broadcastGameState();
+            } else {
+                // Edge case: semua matching card sudah ada di topCard (duplikat)
+                // Paksa draw/force-pick agar game tidak stuck
+                if (this.gs.drawPile.length === 0) {
+                    bot.mustForcePick = true;
+                } else if (this.dealCard(bot)) {
+                    bot.mustDraw = false; bot.hasPlayed = true;
+                    this.gs.currentRoundPlays.push({ playerId: bot.id, playerName: bot.name, card: null, power: 0 });
+                    this.broadcastLog(`👤 ${bot.name} melakukan Draw Card (fallback duplikat)`);
+                }
+                this.broadcastGameState();
+            }
         }
     }
     private checkPhase2End() {
@@ -877,6 +911,9 @@ class GameEngine {
             this.gs.currentRoundPlays.push({ playerId: player.id, playerName: player.name, card: null, power: 0 });
             this.broadcastLog(`👤 ${player.name} melakukan Draw Card`);
         } else {
+            // dealCard mengembalikan false → drawPile habis → mustForcePick sudah di-set
+            // Pastikan mustDraw di-clear agar checkPhase2End melihat kondisi yang benar
+            player.mustDraw = false;
             this.broadcastLog(`⚠️ ${player.name} gagal Draw - Draw Pile habis → Force Pick`);
         }
         this.broadcastGameState();
@@ -951,11 +988,13 @@ class GameEngine {
         const player = this.gs.players.find(p => p.id === playerId);
         if (!player || player.winner || player.isBot || this.gs.gameOver) return;
 
-        // Hitung rank berdasarkan siapa yang sudah menyerah/menang
-        // Tapi karena menyerah = kalah, rank dari belakang
-        // Sebelum player.winner = true, getActivePlayers() masih termasuk player ini
-        const currentActive = this.getActivePlayers(); // [pemain ini, dan yang lain]
-        player.rank = currentActive.length; // pemain ini dapat rank = jumlah orang yang aktif saat ini
+        // Surrendering player mendapat rank TERBURUK yang belum dipakai.
+        // Contoh: 4 pemain, A menang (rank 1), B menyerah pertama → rank 4, C menyerah kedua → rank 3, dst.
+        const totalPlayers = this.gs.players.length;
+        const takenRanks   = new Set(this.gs.winners.map(w => w.rank));
+        let worstRank      = totalPlayers;
+        while (worstRank > 0 && takenRanks.has(worstRank)) worstRank--;
+        player.rank = worstRank > 0 ? worstRank : totalPlayers;
         player.winner = true;
         this.gs.winners.push(player);
 
@@ -1029,7 +1068,11 @@ class GameEngine {
             }
             if (activePlayers.length === 1) {
                 const loser = activePlayers[0];
-                loser.rank = this.gs.winners.length + 1; loser.winner = true;
+                // Cari rank terbaik (terkecil) yang belum dipakai, agar tidak tabrakan dengan surrenderer
+                const takenRanks = new Set(this.gs.winners.map(w => w.rank));
+                let loserRank = this.gs.winners.length + 1;
+                while (takenRanks.has(loserRank)) loserRank++;
+                loser.rank = loserRank; loser.winner = true;
                 this.gs.winners.push(loser);
                 this.broadcastLog(`💀 ${loser.name} mendapat peringkat terakhir`);
                 setTimeout(() => { this.gs.isEndingRound = false; this.endGame(); }, 1000); return;
@@ -1046,7 +1089,19 @@ class GameEngine {
     private endGame() {
         this.gs.gameOver = true;
         this.clearAllAfkTimers();
-        this.gs.players.filter(p => !p.winner).forEach((p, i) => { p.rank = this.gs.winners.length + i + 1; });
+        // Assign rank untuk pemain yang belum punya rank, hindari tabrakan dengan surrenderer
+        const takenRanks = new Set(this.gs.winners.map(w => w.rank));
+        let nextRank = this.gs.winners.length + 1;
+        this.gs.players.filter(p => !p.winner).forEach(p => {
+            while (takenRanks.has(nextRank)) nextRank++;
+            p.rank = nextRank;
+            takenRanks.add(nextRank);
+            nextRank++;
+        });
+        // Safety net final: pastikan tidak ada pemain dengan rank 0
+        let safeMax = Math.max(0, ...this.gs.players.map(p => p.rank));
+        this.gs.players.filter(p => p.rank === 0).forEach(p => { p.rank = ++safeMax; });
+
         this.broadcastToAll({
             type: 'GAME_OVER',
             players: this.gs.players.map(p => ({ id: p.id, name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot }))
@@ -1115,7 +1170,7 @@ class GameEngine {
                 autoMode: p.autoMode,
                 disconnectedAt: p.disconnectedAt
             })),
-            roundHistory: this.gs.roundHistory,
+            roundHistory: this.gs.roundHistory.slice(-10), // kirim 10 ronde terakhir saja
             winners: this.gs.winners.map(p => ({ id: p.id, name: p.name, rank: p.rank })),
             gameOver: this.gs.gameOver
         };
@@ -1350,15 +1405,22 @@ class MatchmakingQueue {
         return true;
     }
 
-    // Cleanup HANYA room yang sudah 'finished' dan sudah 5 menit sejak selesai
+    // Cleanup room yang sudah 'finished' (5 menit) atau stuck di 'playing'/'starting' (2 jam)
     cleanupFinishedRooms() {
         const now = Date.now();
-        const MAX_AGE = 5 * 60 * 1000;
+        const MAX_FINISHED_AGE  = 5 * 60 * 1000;        // 5 menit setelah selesai
+        const MAX_PLAYING_AGE   = 2 * 60 * 60 * 1000;   // 2 jam — mencegah memory leak room stuck
         this.rooms.forEach((room, roomId) => {
-            if (room.status === 'playing' || room.status === 'starting') return;
-            const finishedTime = room.finishedAt ?? room.createdAt;
-            if (room.status === 'finished' && (now - finishedTime) > MAX_AGE) {
-                console.log(`🗑️ Cleanup finished room ${roomId}`);
+            if (room.status === 'finished') {
+                const finishedTime = room.finishedAt ?? room.createdAt;
+                if ((now - finishedTime) > MAX_FINISHED_AGE) {
+                    console.log(`🗑️ Cleanup finished room ${roomId}`);
+                    this.rooms.delete(roomId);
+                }
+            } else if ((now - room.createdAt) > MAX_PLAYING_AGE) {
+                // Room stuck di 'playing' atau 'starting' lebih dari 2 jam
+                console.log(`🗑️ Cleanup stale room ${roomId} (status: ${room.status}, age: ${Math.round((now - room.createdAt)/60000)}m)`);
+                try { room.gameEngine.cleanupMatch(); } catch(_) {}
                 this.rooms.delete(roomId);
             }
         });
