@@ -482,13 +482,19 @@ async function savePlayerStats(userUid: string, playerName: string, position: nu
             _updatedStats = { ...s };
             return s;
         });
-        // Push history + update leaderboard (dengan stats lengkap) secara paralel
-        const [histOk, lbOk] = await Promise.all([
-            fbPush(`${base}/history`, {
+        // Push history dengan retry (hingga 3x, 800ms antar percobaan)
+        // karena POST ke Firebase sesekali gagal karena network hiccup.
+        let histOk = false;
+        for (let hi = 0; hi < 3 && !histOk; hi++) {
+            if (hi > 0) await new Promise(r => setTimeout(r, 800));
+            histOk = await fbPush(`${base}/history`, {
                 rank: position, date: Date.now(),
                 rankBefore: _rankBefore, rankAfter: _rankAfter,
                 ptsBefore: _ptsBefore, ptsAfter: _ptsAfter, ptsChange: _ptsChange
-            }),
+            });
+        }
+        // Update leaderboard secara paralel (non-kritis)
+        const [lbOk] = await Promise.all([
             // Sinkronisasi node leaderboard: rank + stats lengkap agar tampil benar di leaderboard
             fbSet(`/leaderboard/${userUid}`, {
                 name: playerName,
@@ -609,7 +615,22 @@ class GameEngine {
                     } else {
                         _p.statsSaved = false;
                         if (_p.socket && _p.socket.readyState === 1) {
+                            // Socket masih terbuka → minta client lakukan fallback save
                             try { _p.socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT', rank: _p.rank })); } catch (_) { /* noop */ }
+                        } else {
+                            // Socket sudah tutup (player sudah meninggalkan match) → retry server-side
+                            console.log(`⚠️ checkWin save gagal (socket tutup) → retry server-side uid=${_p.userUid}`);
+                            _p.statsSaved = true;
+                            setTimeout(() => {
+                                savePlayerStats(_p.userUid, _p.name, _p.rank).then(ok2 => {
+                                    if (ok2) {
+                                        console.log(`✅ checkWin retry berhasil uid=${_p.userUid}`);
+                                    } else {
+                                        _p.statsSaved = false;
+                                        console.log(`❌ checkWin retry juga gagal uid=${_p.userUid}`);
+                                    }
+                                });
+                            }, 2000);
                         }
                     }
                 });
