@@ -503,7 +503,8 @@ async function savePlayerStats(userUid: string, playerName: string, position: nu
                 updatedAt: Date.now()
             })
         ]);
-        const ok = statsOk && histOk && rankOk && lbOk;
+        // lbOk bersifat non-kritis: kegagalan leaderboard tidak boleh memicu client fallback
+        const ok = statsOk && histOk && rankOk;
         console.log(`${ok ? "✅" : "⚠️ "} savePlayerStats uid=${userUid} pos=${position} stats=${statsOk} hist=${histOk} rank=${rankOk} lb=${lbOk}`);
         return ok;
     } catch (e) {
@@ -1043,7 +1044,7 @@ class GameEngine {
                 if (!ok) {
                     _p.statsSaved = false;
                     if (_p.socket && _p.socket.readyState === 1) {
-                        try { _p.socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT' })); } catch (_) { /* noop */ }
+                        try { _p.socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT', rank: _p.rank })); } catch (_) { /* noop */ }
                     }
                 }
             });
@@ -1150,7 +1151,7 @@ class GameEngine {
                 const sock = p.socket;
                 savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
                     if (!ok && sock && sock.readyState === 1 /* OPEN */) {
-                        try { sock.send(JSON.stringify({ type: "SAVE_STATS_CLIENT" })); } catch (_) { /* noop */ }
+                        try { sock.send(JSON.stringify({ type: "SAVE_STATS_CLIENT", rank: p.rank })); } catch (_) { /* noop */ }
                     }
                 });
             });
