@@ -594,6 +594,26 @@ class GameEngine {
             this.gs.winners.push(player);
             const medals = ['🥇','🥈','🥉','🎖️'];
             this.broadcastLog(`${medals[player.rank-1] || '🏅'} ${player.name} MENANG! Peringkat: ${player.rank}`);
+
+            // Simpan stats segera saat pemain menang (mirip pola handleSurrender).
+            // Dilakukan di sini karena socket masih terbuka — STATS_SAVED / SAVE_STATS_CLIENT
+            // masih bisa dikirim ke client. Flag statsSaved mencegah double-save di endGame().
+            if (!player.isBot && player.userUid && player.userUid !== "BOT" && !player.statsSaved) {
+                player.statsSaved = true;
+                const _p = player;
+                savePlayerStats(_p.userUid, _p.name, _p.rank).then(ok => {
+                    if (ok) {
+                        if (_p.socket && _p.socket.readyState === 1) {
+                            try { _p.socket.send(JSON.stringify({ type: 'STATS_SAVED', rank: _p.rank })); } catch (_) { /* noop */ }
+                        }
+                    } else {
+                        _p.statsSaved = false;
+                        if (_p.socket && _p.socket.readyState === 1) {
+                            try { _p.socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT', rank: _p.rank })); } catch (_) { /* noop */ }
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -1191,6 +1211,19 @@ class GameEngine {
         this.gs.gameOver = true;
         this.clearAllAfkTimers();
         console.log(`🧹 Match ${this.roomId} dibersihkan (semua pemain manusia telah pergi)`);
+
+        // Safety net: simpan stats pemain manusia yang sudah punya rank tapi belum tersimpan.
+        // Kasus: pemain menang (checkWin) lalu langsung LEAVE_MATCH sebelum savePlayerStats selesai,
+        // atau koneksi putus sebelum endGame() dipanggil.
+        this.gs.players
+            .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved && p.winner && p.rank > 0)
+            .forEach(p => {
+                p.statsSaved = true;
+                savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
+                    if (!ok) p.statsSaved = false;
+                    console.log(`${ok ? '✅' : '⚠️'} cleanupMatch saveStats uid=${p.userUid} pos=${p.rank}`);
+                });
+            });
     }
 
     getFullState() {
