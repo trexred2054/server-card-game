@@ -400,6 +400,21 @@ async function fbPush(path: string, value: unknown): Promise<boolean> {
     return res.ok;
 }
 
+async function fbSet(path: string, value: unknown): Promise<boolean> {
+    const token = await fbGetToken();
+    if (!token) return false;
+    const res = await fetch(`${FB_DB_URL}${path}.json`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(value)
+    });
+    if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.error(`❌ fbSet PUT failed ${res.status}: ${errText}`);
+    }
+    return res.ok;
+}
+
 // =============================================
 // RANK SYSTEM (SERVER-SIDE)
 // =============================================
@@ -432,12 +447,13 @@ function calcRank(name: string, pts: number, pos: number): { name: string; pts: 
     return { name: nn, pts: np };
 }
 
-async function savePlayerStats(userUid: string, position: number): Promise<boolean> {
+async function savePlayerStats(userUid: string, playerName: string, position: number): Promise<boolean> {
     if (!fbServiceAccount || !userUid || userUid === "BOT") return false;
     try {
         const base = `/users/${userUid}`;
         // RankData dulu agar bisa catat perubahan ke history
         let _rankBefore = "Bronze III", _rankAfter = "Bronze III", _ptsChange = 0, _ptsBefore = 0, _ptsAfter = 0;
+        let _peakRank = "Bronze III";
         const rankOk = await fbTransaction(`${base}/rankData`, (r) => {
             if (!r) r = { rankName: "Bronze III", points: 0, peakRank: "Bronze III", peakRankIndex: 0 };
             _rankBefore = r.rankName || "Bronze III";
@@ -453,23 +469,42 @@ async function savePlayerStats(userUid: string, position: number): Promise<boole
             } else if (res.name === r.peakRank && res.pts > (r.peakRankPoints || 0)) {
                 r.peakRankPoints = res.pts;
             }
+            _peakRank = r.peakRank || res.name;
             return r;
         });
-        const [statsOk, histOk] = await Promise.all([
-            fbTransaction(`${base}/stats`, (s) => {
-                if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
-                s.totalMatches = (s.totalMatches || 0) + 1;
-                s[`rank${position}`] = (s[`rank${position}`] || 0) + 1;
-                return s;
-            }),
+        // Update stats dulu agar hasilnya bisa dimasukkan ke leaderboard node
+        // deno-lint-ignore no-explicit-any
+        let _updatedStats: any = null;
+        const statsOk = await fbTransaction(`${base}/stats`, (s) => {
+            if (!s) s = { totalMatches: 0, rank1: 0, rank2: 0, rank3: 0, rank4: 0 };
+            s.totalMatches = (s.totalMatches || 0) + 1;
+            s[`rank${position}`] = (s[`rank${position}`] || 0) + 1;
+            _updatedStats = { ...s };
+            return s;
+        });
+        // Push history + update leaderboard (dengan stats lengkap) secara paralel
+        const [histOk, lbOk] = await Promise.all([
             fbPush(`${base}/history`, {
                 rank: position, date: Date.now(),
                 rankBefore: _rankBefore, rankAfter: _rankAfter,
                 ptsBefore: _ptsBefore, ptsAfter: _ptsAfter, ptsChange: _ptsChange
+            }),
+            // Sinkronisasi node leaderboard: rank + stats lengkap agar tampil benar di leaderboard
+            fbSet(`/leaderboard/${userUid}`, {
+                name: playerName,
+                rankName: _rankAfter,
+                points: _ptsAfter,
+                peakRank: _peakRank,
+                totalMatches: _updatedStats?.totalMatches ?? 0,
+                rank1: _updatedStats?.rank1 ?? 0,
+                rank2: _updatedStats?.rank2 ?? 0,
+                rank3: _updatedStats?.rank3 ?? 0,
+                rank4: _updatedStats?.rank4 ?? 0,
+                updatedAt: Date.now()
             })
         ]);
-        const ok = statsOk && histOk && rankOk;
-        console.log(`${ok ? "✅" : "⚠️ "} savePlayerStats uid=${userUid} pos=${position} stats=${statsOk} hist=${histOk} rank=${rankOk}`);
+        const ok = statsOk && histOk && rankOk && lbOk;
+        console.log(`${ok ? "✅" : "⚠️ "} savePlayerStats uid=${userUid} pos=${position} stats=${statsOk} hist=${histOk} rank=${rankOk} lb=${lbOk}`);
         return ok;
     } catch (e) {
         console.error(`❌ savePlayerStats uid=${userUid}:`, e);
@@ -1004,7 +1039,7 @@ class GameEngine {
         if (player.userUid && player.userUid !== "BOT") {
             player.statsSaved = true;
             const _p = player;
-            savePlayerStats(_p.userUid, _p.rank).then(ok => {
+            savePlayerStats(_p.userUid, _p.name, _p.rank).then(ok => {
                 if (!ok) {
                     _p.statsSaved = false;
                     if (_p.socket && _p.socket.readyState === 1) {
@@ -1113,7 +1148,7 @@ class GameEngine {
             .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved)
             .forEach(p => {
                 const sock = p.socket;
-                savePlayerStats(p.userUid, p.rank).then(ok => {
+                savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
                     if (!ok && sock && sock.readyState === 1 /* OPEN */) {
                         try { sock.send(JSON.stringify({ type: "SAVE_STATS_CLIENT" })); } catch (_) { /* noop */ }
                     }
@@ -1449,11 +1484,39 @@ setInterval(() => matchmaking.cleanupFinishedRooms(), 60000);
 console.log(`🎮 Card Game Nusantara Server v2`);
 console.log(`📦 Total kartu: ${ALL_CARDS.length} (${ALL_PROVINCES.length} provinsi × 5)`);
 
-Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, (req) => {
+Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
     const url = new URL(req.url);
 
     if (url.pathname === "/stats") return Response.json(matchmaking.getStats());
     if (url.pathname === "/health") return new Response("OK", { status: 200 });
+
+    if (url.pathname === "/leaderboard") {
+        const token = await fbGetToken();
+        if (!token) return Response.json({ error: "Firebase not configured" }, { status: 503 });
+        const limit = Math.min(parseInt(url.searchParams.get("limit") || "100"), 500);
+        const res = await fetch(
+            `${FB_DB_URL}/leaderboard.json?orderBy="rankName"&limitToLast=${limit}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!res.ok) return Response.json({ error: "Failed to fetch leaderboard" }, { status: 502 });
+        // deno-lint-ignore no-explicit-any
+        const raw: Record<string, any> | null = await res.json();
+        if (!raw) return Response.json([]);
+        const entries = Object.entries(raw).map(([uid, d]) => ({
+            uid, name: d.name, rankName: d.rankName, points: d.points,
+            peakRank: d.peakRank, updatedAt: d.updatedAt
+        }));
+        // Sort: rank index desc, lalu points desc
+        entries.sort((a, b) => {
+            const ai = RANKS.indexOf(a.rankName ?? "Bronze III");
+            const bi = RANKS.indexOf(b.rankName ?? "Bronze III");
+            if (bi !== ai) return bi - ai;
+            return (b.points ?? 0) - (a.points ?? 0);
+        });
+        return Response.json(entries.slice(0, limit), {
+            headers: { "Access-Control-Allow-Origin": "*" }
+        });
+    }
 
     if (req.headers.get("upgrade") === "websocket") {
         const { socket, response } = Deno.upgradeWebSocket(req);
