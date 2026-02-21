@@ -397,6 +397,10 @@ async function fbPush(path: string, value: unknown): Promise<boolean> {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(value)
     });
+    if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.error(`❌ fbPush POST failed ${res.status} path=${path}: ${errText}`);
+    }
     return res.ok;
 }
 
