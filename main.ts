@@ -1144,14 +1144,20 @@ class GameEngine {
         });
 
         // Server-side: simpan stats + rank setiap pemain manusia
-        // Jika gagal, kirim SAVE_STATS_CLIENT agar client menjadi fallback
+        // Kirim STATS_SAVED jika berhasil, SAVE_STATS_CLIENT jika gagal (fallback ke client)
         this.gs.players
             .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved)
             .forEach(p => {
                 const sock = p.socket;
                 savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
-                    if (!ok && sock && sock.readyState === 1 /* OPEN */) {
-                        try { sock.send(JSON.stringify({ type: "SAVE_STATS_CLIENT", rank: p.rank })); } catch (_) { /* noop */ }
+                    // Kirim STATS_SAVED agar client tahu data Firebase sudah update
+                    if (sock && sock.readyState === 1) {
+                        try {
+                            sock.send(JSON.stringify({
+                                type: ok ? "STATS_SAVED" : "SAVE_STATS_CLIENT",
+                                rank: p.rank
+                            }));
+                        } catch (_) {}
                     }
                 });
             });
@@ -1629,6 +1635,13 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                                 id: p.id, name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot
                                             }))
                                         }));
+                                        // Kirim SAVE_STATS_CLIENT agar client menyimpan stats sebagai fallback
+                                        // (server sudah mencoba simpan saat game selesai, tapi socket lama mungkin sudah putus)
+                                        if (gp && gp.rank > 0) {
+                                            try {
+                                                socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT', rank: gp.rank }));
+                                            } catch (_) {}
+                                        }
                                         console.log(`📤 GAME_OVER dikirim ulang ke ${data.playerId} (late rejoin - room sudah finished)`);
                                     } else {
                                         socket.send(JSON.stringify({ type: 'ERROR', message: 'Akun tidak cocok.' }));
