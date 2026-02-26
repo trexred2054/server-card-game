@@ -716,6 +716,11 @@ async function savePlayerStats(userUid: string, playerName: string, position: nu
 class GameEngine {
     roomId: string;
     onGameOver?: () => void;
+    selectedProvinces: string[] = [];
+
+    setSelectedProvinces(provinces: string[]) {
+        this.selectedProvinces = provinces;
+    }
 
     gs: {
         round: number; phase: number; phase1Player: string | null;
@@ -870,16 +875,25 @@ class GameEngine {
     }
 
     startGame() {
-        this.gs.drawPile = this.shuffle([...ALL_CARDS]);
+        // Gunakan hanya kartu dari provinsi terpilih (7 provinsi per match)
+        const cardsPool = this.selectedProvinces.length > 0
+            ? ALL_CARDS.filter(c => this.selectedProvinces.includes(c.province))
+            : ALL_CARDS;
+        this.gs.drawPile = this.shuffle([...cardsPool]);
         const usedIds = new Set<string>();
 
-        // Distribusi per pemain: 1 Legendary, 1 Epic, 3 Rare, 3 Uncommon, 2 Common
+        // Distribusi per pemain: 1 kartu per rarity (10 kartu total)
         const DEAL_PLAN: { rarity: string; count: number }[] = [
-            { rarity: 'legendary', count: 1 },
-            { rarity: 'epic',      count: 1 },
-            { rarity: 'rare',      count: 3 },
-            { rarity: 'uncommon',  count: 3 },
-            { rarity: 'common',    count: 2 },
+            { rarity: 'mythic',       count: 1 },
+            { rarity: 'legendary',    count: 1 },
+            { rarity: 'epic',         count: 1 },
+            { rarity: 'rareplus',     count: 1 },
+            { rarity: 'rarestar',     count: 1 },
+            { rarity: 'rare',         count: 1 },
+            { rarity: 'uncommon',     count: 1 },
+            { rarity: 'uncommonplus', count: 1 },
+            { rarity: 'commonplus',   count: 1 },
+            { rarity: 'common',       count: 1 },
         ];
 
         this.gs.players.forEach(player => {
@@ -898,7 +912,7 @@ class GameEngine {
             }
         });
 
-        this.broadcastLog(`🎮 Game dimulai! Setiap pemain mendapat 10 kartu (1L/1E/3R/3U/2C).`);
+        this.broadcastLog(`🎮 Game dimulai! 7 provinsi aktif. Setiap pemain mendapat 10 kartu (1 per rarity).`);
         setTimeout(() => this.startPhase1(), 500);
     }
 
@@ -1638,8 +1652,16 @@ class MatchmakingQueue {
     private createMatch(players: Player[], botCount: number) {
         const roomId = `room_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         const gameEngine = new GameEngine(roomId);
-        players.forEach(p => gameEngine.addPlayer({ 
-            id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid 
+
+        // Pilih 7 provinsi: Bangka Belitung SELALU hadir + 6 acak dari sisanya
+        const MANDATORY_PROVINCE = 'Bangka Belitung';
+        const otherProvinces = ALL_PROVINCES.filter(p => p.name !== MANDATORY_PROVINCE);
+        const shuffled = [...otherProvinces].sort(() => Math.random() - 0.5).slice(0, 6);
+        const selectedProvinces = [MANDATORY_PROVINCE, ...shuffled.map(p => p.name)];
+        gameEngine.setSelectedProvinces(selectedProvinces);
+
+        players.forEach(p => gameEngine.addPlayer({
+            id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid
         }));
         for (let i = 0; i < botCount; i++) gameEngine.addBot(GameEngine.pickBotName());
 
@@ -1653,13 +1675,19 @@ class MatchmakingQueue {
             console.log(`🏁 Room ${roomId} selesai - akan di-cleanup dalam 5 menit`);
         };
 
+        // Kirim daftar provinsi terpilih ke semua pemain segera setelah match ditemukan
+        players.forEach(p => {
+            try { p.socket.send(JSON.stringify({ type: 'PROVINCES_SELECTED', provinces: selectedProvinces, mandatory: MANDATORY_PROVINCE })); } catch(e) {}
+        });
+
+        // 6 detik: cukup untuk pemain melihat provinsi sebelum game dimulai
         setTimeout(() => {
             room.status = 'playing';
             gameEngine.startGame();
             players.forEach(p => {
                 try { p.socket.send(JSON.stringify({ type: 'GAME_STARTED', roomId, playerId: p.id, state: gameEngine.getFullState() })); } catch(e) {}
             });
-        }, 3000);
+        }, 6000);
     }
 
     removePlayer(playerId: string) {
@@ -1737,7 +1765,7 @@ const matchmaking = new MatchmakingQueue();
 setInterval(() => matchmaking.cleanupFinishedRooms(), 60000);
 
 console.log(`🎮 Card Game Nusantara Server v2`);
-console.log(`📦 Total kartu: ${ALL_CARDS.length} (${ALL_PROVINCES.length} provinsi × 5)`);
+console.log(`📦 Total kartu: ${ALL_CARDS.length} (${ALL_PROVINCES.length} provinsi × 10) | Per match: 7 provinsi × 10 = 70 kartu`);
 
 Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
     const url = new URL(req.url);
