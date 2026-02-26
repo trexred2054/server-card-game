@@ -27,6 +27,8 @@ interface GamePlayer {
     userUid: string;
     leftMatch: boolean;
     statsSaved?: boolean;
+    botLevel?: number;
+    drawLevel: number; drawCount: number; // Level 1-5, naik berdasarkan jumlah draw
 }
 
 interface RoundPlay { playerId: string; playerName: string; card: Card | null; power: number; isForcePickPlay?: boolean; }
@@ -499,6 +501,44 @@ ALL_PROVINCES.forEach(province => {
 });
 
 // =============================================
+// DRAW CARD LEVEL SYSTEM
+// Level 1 (awal) → Level 5 (tertinggi)
+// Naik level berdasarkan jumlah draw: L1→L2: 2, L2→L3: 3, L3→L4: 4, L4→L5: 5 (total 14 draw)
+// =============================================
+const DRAW_RATES: Record<number, Record<string, number>> = {
+    1: { // Level 1 - awal permainan
+        mythic: 0.5, legendary: 1, epic: 2.5, rareplus: 5, rarestar: 8,
+        rare: 12, uncommon: 16, uncommonplus: 18, commonplus: 19, common: 18
+    },
+    2: { // Level 2
+        mythic: 2, legendary: 4, epic: 7, rareplus: 10, rarestar: 12,
+        rare: 15, uncommon: 18, uncommonplus: 15, commonplus: 9.5, common: 7.5
+    },
+    3: { // Level 3
+        mythic: 5, legendary: 8, epic: 12, rareplus: 13, rarestar: 13,
+        rare: 12, uncommon: 13, uncommonplus: 10, commonplus: 8, common: 6
+    },
+    4: { // Level 4
+        mythic: 8, legendary: 12, epic: 15, rareplus: 15, rarestar: 14,
+        rare: 13, uncommon: 10, uncommonplus: 7, commonplus: 3.5, common: 2.5
+    },
+    5: { // Level 5 - tertinggi
+        mythic: 25, legendary: 20, epic: 15, rareplus: 12, rarestar: 10,
+        rare: 8, uncommon: 5, uncommonplus: 3, commonplus: 1.5, common: 0.5
+    }
+};
+const RARITY_ORDER = ['mythic','legendary','epic','rareplus','rarestar','rare','uncommon','uncommonplus','commonplus','common'];
+const LEVEL_NAMES: Record<number, string> = { 1: 'Lv1', 2: 'Lv2', 3: 'Lv3', 4: 'Lv4', 5: 'Lv5' };
+// Threshold kumulatif draw untuk naik level: L1→L2=2, L2→L3=5, L3→L4=9, L4→L5=14
+function calcDrawLevel(drawCount: number): number {
+    if (drawCount >= 14) return 5;
+    if (drawCount >= 9)  return 4;
+    if (drawCount >= 5)  return 3;
+    if (drawCount >= 2)  return 2;
+    return 1;
+}
+
+// =============================================
 // FIREBASE REST API CLIENT (no external deps)
 // =============================================
 const FB_DB_URL = Deno.env.get("FIREBASE_DATABASE_URL")
@@ -607,6 +647,17 @@ async function fbSet(path: string, value: unknown): Promise<boolean> {
         console.error(`❌ fbSet PUT failed ${res.status}: ${errText}`);
     }
     return res.ok;
+}
+
+// deno-lint-ignore no-explicit-any
+async function fbRead(path: string): Promise<any> {
+    const token = await fbGetToken();
+    if (!token) return null;
+    const res = await fetch(`${FB_DB_URL}${path}.json`, {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) return null;
+    return await res.json().catch(() => null);
 }
 
 // =============================================
@@ -747,19 +798,20 @@ class GameEngine {
         };
     }
 
-    addPlayer(p: { id: string; name: string; isBot: boolean; socket?: WebSocket; userUid: string }) {
+    addPlayer(p: { id: string; name: string; isBot: boolean; socket?: WebSocket; userUid: string; botLevel?: number }) {
         const player: GamePlayer = {
             id: p.id, name: p.name, isBot: p.isBot, socket: p.socket,
             hand: [], totalPower: 0, hasPlayed: false, mustDraw: false,
             mustForcePick: false, freed: false, winner: false, rank: 0,
             isProcessingAction: false, autoMode: false, userUid: p.userUid || '',
-            leftMatch: false, statsSaved: false
+            leftMatch: false, statsSaved: false, botLevel: p.botLevel,
+            drawLevel: 1, drawCount: 0
         };
         this.gs.players.push(player);
     }
 
-    addBot(name: string) {
-        this.addPlayer({ id: `bot_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name, isBot: true, userUid: 'BOT' });
+    addBot(name: string, level: number = 1) {
+        this.addPlayer({ id: `bot_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name, isBot: true, userUid: 'BOT', botLevel: level });
     }
 
     static BOT_NAMES = ['Miya','Nayla','Aldi','Marcel','Zoe','Kara','Mega','Genta','Flex','Angel','Teorita','Miko','Luba','Nana','Kong','Walka'];
@@ -854,6 +906,13 @@ class GameEngine {
         }, delay) as unknown as number;
     }
 
+    private logDrawLevels() {
+        const active = this.getActivePlayers();
+        if (active.length === 0) return;
+        const logParts = active.map(p => `${p.name}: ${LEVEL_NAMES[p.drawLevel]}(${p.drawCount} draws)`);
+        this.broadcastLog(`📊 Draw Level: ${logParts.join(' | ')}`);
+    }
+
     private dealCard(player: GamePlayer, maxRetry = 50): boolean {
         if (this.gs.drawPile.length === 0) {
             player.mustForcePick = true; player.mustDraw = false;
@@ -864,6 +923,60 @@ class GameEngine {
             ...this.gs.topCard.map(c => c.id),
             ...this.gs.players.flatMap(p => p.hand.map(c => c.id))
         ]);
+
+        // --- Weighted random by rarity (draw level system) ---
+        const availableCards = this.gs.drawPile.filter(c => !usedIds.has(c.id));
+        if (availableCards.length > 0) {
+            const level = player.drawLevel ?? 1;
+            const rateTable = DRAW_RATES[level] ?? DRAW_RATES[1];
+
+            // Kelompokkan kartu tersedia per rarity
+            const byRarity: Record<string, Card[]> = {};
+            for (const c of availableCards) {
+                if (!byRarity[c.rarity]) byRarity[c.rarity] = [];
+                byRarity[c.rarity].push(c);
+            }
+
+            // Bangun daftar rarity yang tersedia beserta bobotnya
+            let totalWeight = 0;
+            const weighted: { rarity: string; weight: number }[] = [];
+            for (const rarity of RARITY_ORDER) {
+                if (byRarity[rarity]?.length) {
+                    const w = rateTable[rarity] ?? 0;
+                    weighted.push({ rarity, weight: w });
+                    totalWeight += w;
+                }
+            }
+
+            if (totalWeight > 0) {
+                // Pilih rarity secara weighted random
+                let rand = Math.random() * totalWeight;
+                let chosenRarity = weighted[weighted.length - 1].rarity;
+                for (const { rarity, weight } of weighted) {
+                    rand -= weight;
+                    if (rand <= 0) { chosenRarity = rarity; break; }
+                }
+                // Pilih kartu acak dari rarity terpilih
+                const pool = byRarity[chosenRarity];
+                if (pool?.length) {
+                    const chosen = pool[Math.floor(Math.random() * pool.length)];
+                    const idx = this.gs.drawPile.indexOf(chosen);
+                    if (idx !== -1) this.gs.drawPile.splice(idx, 1);
+                    player.hand.push(chosen);
+                    this.updatePower(player);
+                    player.drawCount++;
+                    const newLevel = calcDrawLevel(player.drawCount);
+                    if (newLevel > player.drawLevel) {
+                        player.drawLevel = newLevel;
+                        this.broadcastLog(`⬆️ ${player.name} naik ke Draw ${LEVEL_NAMES[newLevel]}! (${player.drawCount} draws)`);
+                    }
+                    this.broadcastLog(`🎴 ${player.name} draw [${LEVEL_NAMES[level]}]: ${chosen.name} (${chosen.rarity})`);
+                    return true;
+                }
+            }
+        }
+
+        // Fallback: ambil kartu pertama yang tersedia dari draw pile
         for (let attempt = 0; attempt < maxRetry; attempt++) {
             if (this.gs.drawPile.length === 0) break;
             const card = this.gs.drawPile.pop()!;
@@ -930,6 +1043,9 @@ class GameEngine {
             this.clearAfkTimer(p);
         });
         setTimeout(() => { this.gs.isStartingPhase = false; }, 100);
+
+        // Log draw level masing-masing pemain
+        this.logDrawLevels();
 
         if (this.gs.round === 1) {
             this.broadcastGameState();
@@ -1076,8 +1192,12 @@ class GameEngine {
         }
         const matching = bot.hand.filter(c => c.province === this.gs.currentProvince);
         if (matching.length > 0) {
-            // Cari kartu yang TIDAK duplikat di topCard (sorted asc power)
-            const playable = matching.sort((a,b) => a.power - b.power).filter(c => !this.gs.topCard.some(t => t.id === c.id));
+            // Level 1: mainkan kartu power terbesar (desc). Level 2 & 3: terkecil (asc).
+            const level = bot.botLevel ?? 1;
+            const sortedMatching = level === 1
+                ? [...matching].sort((a,b) => b.power - a.power)
+                : [...matching].sort((a,b) => a.power - b.power);
+            const playable = sortedMatching.filter(c => !this.gs.topCard.some(t => t.id === c.id));
             if (playable.length > 0) {
                 const card = playable[0];
                 bot.hand.splice(bot.hand.findIndex(c => c.id === card.id), 1);
@@ -1153,7 +1273,16 @@ class GameEngine {
         } else {
             mustPickPlayers.forEach(bot => {
                 if (this.gs.topCard.length > 0) {
-                    const chosen = [...this.gs.topCard].sort((a,b) => b.power - a.power)[0];
+                    // Level 1: ambil power terkecil; Level 2: acak; Level 3: power terbesar
+                    const level = bot.botLevel ?? 1;
+                    let chosen;
+                    if (level === 1) {
+                        chosen = [...this.gs.topCard].sort((a,b) => a.power - b.power)[0];
+                    } else if (level === 2) {
+                        chosen = this.gs.topCard[Math.floor(Math.random() * this.gs.topCard.length)];
+                    } else {
+                        chosen = [...this.gs.topCard].sort((a,b) => b.power - a.power)[0];
+                    }
                     this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === chosen.id), 1);
                     bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
                     this.updatePower(bot);
@@ -1219,7 +1348,16 @@ class GameEngine {
 
         this.gs.forcePickPlayers.filter(p => p.isBot && !p.hasPlayed).forEach(bot => {
             if (this.gs.topCard.length > 0) {
-                const chosen = [...this.gs.topCard].sort((a,b) => b.power - a.power)[0];
+                // Level 1: ambil power terkecil; Level 2: acak; Level 3: power terbesar
+                const level = bot.botLevel ?? 1;
+                let chosen;
+                if (level === 1) {
+                    chosen = [...this.gs.topCard].sort((a,b) => a.power - b.power)[0];
+                } else if (level === 2) {
+                    chosen = this.gs.topCard[Math.floor(Math.random() * this.gs.topCard.length)];
+                } else {
+                    chosen = [...this.gs.topCard].sort((a,b) => b.power - a.power)[0];
+                }
                 this.gs.topCard.splice(this.gs.topCard.findIndex(c => c.id === chosen.id), 1);
                 bot.hand.push(chosen); bot.mustForcePick = false; bot.hasPlayed = true;
                 this.updatePower(bot);
@@ -1472,7 +1610,8 @@ class GameEngine {
                 mustForcePick: p.mustForcePick, freed: p.freed, winner: p.winner,
                 rank: p.rank, isProcessingAction: p.isProcessingAction,
                 autoMode: p.autoMode,
-                disconnectedAt: p.disconnectedAt
+                disconnectedAt: p.disconnectedAt,
+                drawLevel: p.drawLevel ?? 1, drawCount: p.drawCount ?? 0
             })),
             roundHistory: this.gs.roundHistory.slice(-10), // kirim 10 ronde terakhir saja
             winners: this.gs.winners.map(p => ({ id: p.id, name: p.name, rank: p.rank })),
@@ -1649,21 +1788,46 @@ class MatchmakingQueue {
         this.createMatch(waitingPlayers, botsNeeded);
     }
 
-    private createMatch(players: Player[], botCount: number) {
+    private async createMatch(players: Player[], botCount: number) {
         const roomId = `room_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         const gameEngine = new GameEngine(roomId);
 
-        // Pilih 7 provinsi: Bangka Belitung SELALU hadir + 6 acak dari sisanya
+        // Pilih 15 provinsi: Bangka Belitung SELALU hadir + 14 acak dari sisanya
         const MANDATORY_PROVINCE = 'Bangka Belitung';
         const otherProvinces = ALL_PROVINCES.filter(p => p.name !== MANDATORY_PROVINCE);
-        const shuffled = [...otherProvinces].sort(() => Math.random() - 0.5).slice(0, 6);
+        const shuffled = [...otherProvinces].sort(() => Math.random() - 0.5).slice(0, 14);
         const selectedProvinces = [MANDATORY_PROVINCE, ...shuffled.map(p => p.name)];
         gameEngine.setSelectedProvinces(selectedProvinces);
 
         players.forEach(p => gameEngine.addPlayer({
             id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid
         }));
-        for (let i = 0; i < botCount; i++) gameEngine.addBot(GameEngine.pickBotName());
+
+        // Kirim daftar provinsi terpilih ke semua pemain segera setelah match ditemukan
+        players.forEach(p => {
+            try { p.socket.send(JSON.stringify({ type: 'PROVINCES_SELECTED', provinces: selectedProvinces, mandatory: MANDATORY_PROVINCE })); } catch(e) {}
+        });
+
+        // Tentukan bot level berdasarkan rank tertinggi pemain manusia
+        let botLevel = 1;
+        if (botCount > 0) {
+            try {
+                const rankResults = await Promise.all(
+                    players.map(p => p.userUid ? fbRead(`/users/${p.userUid}/rankData`) : Promise.resolve(null))
+                );
+                for (const rd of rankResults) {
+                    if (!rd?.rankName) continue;
+                    const rn: string = rd.rankName;
+                    if (rn.startsWith("Platinum")) { botLevel = 3; break; }
+                    if ((rn.startsWith("Gold") || rn.startsWith("Diamond")) && botLevel < 2) botLevel = 2;
+                }
+            } catch (e) {
+                console.warn("⚠️ Gagal fetch rank untuk bot level, pakai level 1:", e);
+            }
+            console.log(`🤖 Bot Level ${botLevel} dipilih untuk match ${roomId}`);
+        }
+
+        for (let i = 0; i < botCount; i++) gameEngine.addBot(GameEngine.pickBotName(), botLevel);
 
         const room: GameRoom = { id: roomId, players, bots: botCount, status: 'starting', gameEngine, createdAt: Date.now() };
         this.rooms.set(roomId, room);
@@ -1674,11 +1838,6 @@ class MatchmakingQueue {
             room.finishedAt = Date.now();
             console.log(`🏁 Room ${roomId} selesai - akan di-cleanup dalam 5 menit`);
         };
-
-        // Kirim daftar provinsi terpilih ke semua pemain segera setelah match ditemukan
-        players.forEach(p => {
-            try { p.socket.send(JSON.stringify({ type: 'PROVINCES_SELECTED', provinces: selectedProvinces, mandatory: MANDATORY_PROVINCE })); } catch(e) {}
-        });
 
         // 6 detik: cukup untuk pemain melihat provinsi sebelum game dimulai
         setTimeout(() => {
