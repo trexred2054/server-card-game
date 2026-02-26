@@ -980,7 +980,17 @@ class GameEngine {
         for (let attempt = 0; attempt < maxRetry; attempt++) {
             if (this.gs.drawPile.length === 0) break;
             const card = this.gs.drawPile.pop()!;
-            if (!usedIds.has(card.id)) { player.hand.push(card); this.updatePower(player); return true; }
+            if (!usedIds.has(card.id)) {
+                player.hand.push(card); this.updatePower(player);
+                player.drawCount++;
+                const newLevel = calcDrawLevel(player.drawCount);
+                if (newLevel > player.drawLevel) {
+                    player.drawLevel = newLevel;
+                    this.broadcastLog(`⬆️ ${player.name} naik ke Draw ${LEVEL_NAMES[newLevel]}! (${player.drawCount} draws)`);
+                }
+                this.broadcastLog(`🎴 ${player.name} draw [${LEVEL_NAMES[player.drawLevel]}]: ${card.name} (${card.rarity})`);
+                return true;
+            }
             this.gs.drawPile.splice(Math.floor(Math.random() * this.gs.drawPile.length), 0, card);
         }
         player.mustForcePick = true; player.mustDraw = false;
