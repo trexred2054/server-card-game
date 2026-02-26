@@ -738,22 +738,27 @@ async function savePlayerStats(userUid: string, playerName: string, position: nu
                 ptsBefore: _ptsBefore, ptsAfter: _ptsAfter, ptsChange: _ptsChange
             });
         }
-        // Update leaderboard secara paralel (non-kritis)
-        const [lbOk] = await Promise.all([
-            // Sinkronisasi node leaderboard: rank + stats lengkap agar tampil benar di leaderboard
-            fbSet(`/leaderboard/${userUid}`, {
-                name: playerName,
-                rankName: _rankAfter,
-                points: _ptsAfter,
-                peakRank: _peakRank,
-                totalMatches: _updatedStats?.totalMatches ?? 0,
-                rank1: _updatedStats?.rank1 ?? 0,
-                rank2: _updatedStats?.rank2 ?? 0,
-                rank3: _updatedStats?.rank3 ?? 0,
-                rank4: _updatedStats?.rank4 ?? 0,
-                updatedAt: Date.now()
-            })
-        ]);
+        // Re-read rankData terbaru sebelum tulis leaderboard.
+        // Ini memastikan jika ada race condition (beberapa savePlayerStats jalan bersamaan),
+        // semua akan baca nilai final yang sama dan leaderboard selalu sinkron dengan rankData.
+        const freshRank = await fbRead(`${base}/rankData`);
+        const _finalRankName = freshRank?.rankName ?? _rankAfter;
+        const _finalPts      = freshRank?.points   ?? _ptsAfter;
+        const _finalPeakRank = freshRank?.peakRank  ?? _peakRank;
+
+        // Update leaderboard (non-kritis)
+        const lbOk = await fbSet(`/leaderboard/${userUid}`, {
+            name: playerName,
+            rankName: _finalRankName,
+            points:   _finalPts,
+            peakRank: _finalPeakRank,
+            totalMatches: _updatedStats?.totalMatches ?? 0,
+            rank1: _updatedStats?.rank1 ?? 0,
+            rank2: _updatedStats?.rank2 ?? 0,
+            rank3: _updatedStats?.rank3 ?? 0,
+            rank4: _updatedStats?.rank4 ?? 0,
+            updatedAt: Date.now()
+        });
         // lbOk bersifat non-kritis: kegagalan leaderboard tidak boleh memicu client fallback
         const ok = statsOk && histOk && rankOk;
         console.log(`${ok ? "✅" : "⚠️ "} savePlayerStats uid=${userUid} pos=${position} stats=${statsOk} hist=${histOk} rank=${rankOk} lb=${lbOk}`);
