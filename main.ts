@@ -1814,6 +1814,12 @@ interface Player {
     timeoutId?: number;
     userUid: string;
     partyId?: string;
+    partySize?: number; // jumlah anggota party yang diharapkan (2 atau 3)
+}
+
+interface PartyLobby {
+    id: string; leaderId: string;
+    members: { uid: string; name: string; socket: WebSocket }[];
 }
 
 interface GameRoom {
@@ -1830,6 +1836,7 @@ interface CustomRoomSlot { id: string; name: string; socket: WebSocket; userUid:
 interface PendingCustomRoom {
     id: string; hostUid: string; hostRole: 'pemain' | 'penonton';
     players: CustomRoomSlot[];
+    botSlots: { level: number }[];
     spectatorSocket?: WebSocket; spectatorName?: string; spectatorUid?: string;
     started: boolean; createdAt: number;
 }
@@ -1853,11 +1860,20 @@ class MatchmakingQueue {
             const group = this.partyGroups.get(player.partyId) || [];
             group.push(player);
             this.partyGroups.set(player.partyId, group);
-            // Jika party sudah lengkap (2 anggota), coba match segera
-            if (group.length >= 2) {
+            // Tunggu sampai semua anggota party masuk (partySize = 2 atau 3)
+            const expected = player.partySize ?? 2;
+            if (group.length >= expected) {
                 this.tryMatchParty(player.partyId);
                 return;
             }
+            // Safety timeout: jika dalam 20 detik tidak semua bergabung, mulai saja
+            if (group.length === 1) {
+                setTimeout(() => {
+                    const g = this.partyGroups.get(player.partyId!);
+                    if (g && g.length >= 2) this.tryMatchParty(player.partyId!);
+                }, 20000);
+            }
+            return;
         }
 
         this.queue.forEach(p => {
@@ -2115,6 +2131,14 @@ class MatchmakingQueue {
     // CUSTOM ROOM (KOSTUM)
     // ============================
     private pendingCustomRooms: Map<string, PendingCustomRoom> = new Map();
+    // uid → { name, socket } — hanya pemain yang idle di home screen
+    private onlineRegistry: Map<string, { name: string; socket: WebSocket }> = new Map();
+    // inviteId → { fromUid, fromName, roomId, toUid }
+    private pendingInvites: Map<string, { fromUid: string; fromName: string; roomId: string; toUid: string }> = new Map();
+    // Party lobby untuk Main Online (ranked)
+    private partyLobbies: Map<string, PartyLobby> = new Map();
+    // partyInviteId → { fromUid, fromName, partyId, toUid }
+    private pendingPartyInvites: Map<string, { fromUid: string; fromName: string; partyId: string; toUid: string }> = new Map();
 
     getPendingCustomRoom(roomId: string): PendingCustomRoom | undefined {
         return this.pendingCustomRooms.get(roomId);
@@ -2125,7 +2149,7 @@ class MatchmakingQueue {
         let roomId: string;
         do { roomId = `cr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
         while (this.pendingCustomRooms.has(roomId) || this.rooms.has(roomId));
-        const entry: PendingCustomRoom = { id: roomId, hostUid, hostRole, players: [], started: false, createdAt: Date.now() };
+        const entry: PendingCustomRoom = { id: roomId, hostUid, hostRole, players: [], botSlots: [], started: false, createdAt: Date.now() };
         let hostPlayerId: string | undefined;
         if (hostRole === 'pemain') {
             hostPlayerId = `crp_${Date.now()}`;
@@ -2149,7 +2173,7 @@ class MatchmakingQueue {
             return { success: false, error: 'Room tidak ditemukan' };
         }
         if (room.started) return { success: false, error: 'Pertandingan sudah dimulai' };
-        if (room.players.length >= 4) return { success: false, error: 'Room sudah penuh (4 pemain)' };
+        if (room.players.length + room.botSlots.length >= 4) return { success: false, error: 'Room sudah penuh (4 slot terisi)' };
         // Cegah player yang sama masuk dua kali (misal dua tab browser)
         if (room.players.some(p => p.userUid === playerUid)) return { success: false, error: 'Kamu sudah ada di room ini' };
         let pid: string;
@@ -2162,15 +2186,25 @@ class MatchmakingQueue {
     broadcastPendingCustomRoomUpdate(roomId: string) {
         const room = this.pendingCustomRooms.get(roomId);
         if (!room) return;
-        const slots = room.players.map((p, i) => ({ slot: i + 1, name: p.name, uid: p.userUid }));
-        const msg = JSON.stringify({ type: 'CUSTOM_ROOM_UPDATE', roomId, slots, hostRole: room.hostRole });
+        const humanSlots = room.players.map((p, i) => ({ slot: i + 1, name: p.name, uid: p.userUid, isBot: false }));
+        const botSlotsInfo = room.botSlots.map((b, i) => ({
+            slot: room.players.length + i + 1,
+            name: `Bot Lv${b.level}`, level: b.level, isBot: true, uid: null
+        }));
+        const totalSlots = humanSlots.length + botSlotsInfo.length;
+        const msg = JSON.stringify({
+            type: 'CUSTOM_ROOM_UPDATE', roomId,
+            slots: [...humanSlots, ...botSlotsInfo],
+            totalSlots, hostRole: room.hostRole, hostUid: room.hostUid
+        });
         room.players.forEach(p => { if (p.socket.readyState === 1) { try { p.socket.send(msg); } catch(_) {} } });
         if (room.spectatorSocket?.readyState === 1) { try { room.spectatorSocket.send(msg); } catch(_) {} }
     }
 
     startCustomRoomGame(roomId: string): boolean {
         const room = this.pendingCustomRooms.get(roomId);
-        if (!room || room.started || room.players.length < 2) return false;
+        const totalSlots = (room?.players.length ?? 0) + (room?.botSlots.length ?? 0);
+        if (!room || room.started || totalSlots < 2 || room.players.length < 1) return false;
         room.started = true;
 
         try {
@@ -2185,11 +2219,13 @@ class MatchmakingQueue {
             gameEngine.setSelectedProvinces(selectedProvinces);
 
             room.players.forEach(p => gameEngine.addPlayer({ id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid }));
+            // Tambahkan bot sesuai slot yang sudah ditentukan host
+            room.botSlots.forEach(b => gameEngine.addBot(GameEngine.pickBotName(), b.level));
 
             const gameRoom: GameRoom = {
                 id: roomId,
                 players: room.players.map(p => ({ id: p.id, name: p.name, socket: p.socket, joinTime: Date.now(), userUid: p.userUid })),
-                bots: 0, status: 'starting', gameEngine, createdAt: Date.now()
+                bots: room.botSlots.length, status: 'starting', gameEngine, createdAt: Date.now()
             };
             this.rooms.set(roomId, gameRoom);
             this.pendingCustomRooms.delete(roomId); // hapus dari pending hanya jika setup berhasil
@@ -2228,6 +2264,207 @@ class MatchmakingQueue {
             this.rooms.delete(roomId);
             return false;
         }
+    }
+
+    // ============================
+    // PARTY LOBBY (Main Online ranked — maks 3 orang)
+    // ============================
+    createPartyLobby(leaderUid: string, leaderName: string, socket: WebSocket): string {
+        let id: string;
+        do { id = `party_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`; }
+        while (this.partyLobbies.has(id));
+        this.partyLobbies.set(id, { id, leaderId: leaderUid, members: [{ uid: leaderUid, name: leaderName, socket }] });
+        return id;
+    }
+
+    inviteToParty(partyId: string, fromUid: string, toUid: string): { success: boolean; error?: string } {
+        const party = this.partyLobbies.get(partyId);
+        if (!party) return { success: false, error: 'Party tidak ditemukan' };
+        if (party.leaderId !== fromUid) return { success: false, error: 'Hanya leader yang bisa mengundang' };
+        if (party.members.length >= 3) return { success: false, error: 'Party sudah penuh (maks 3 pemain)' };
+        if (party.members.some(m => m.uid === toUid)) return { success: false, error: 'Pemain sudah ada di party' };
+        const target = this.onlineRegistry.get(toUid);
+        if (!target || target.socket.readyState !== 1) return { success: false, error: 'Pemain tidak tersedia (offline/sibuk)' };
+        const fromMember = party.members.find(m => m.uid === fromUid);
+        const inviteId = `pinv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        this.pendingPartyInvites.set(inviteId, { fromUid, fromName: fromMember?.name ?? 'Leader', partyId, toUid });
+        try {
+            target.socket.send(JSON.stringify({ type: 'PARTY_INVITE', inviteId, partyId, fromName: fromMember?.name ?? 'Leader' }));
+        } catch (_) {
+            this.pendingPartyInvites.delete(inviteId);
+            return { success: false, error: 'Gagal mengirim undangan' };
+        }
+        setTimeout(() => this.pendingPartyInvites.delete(inviteId), 30000);
+        return { success: true };
+    }
+
+    respondToPartyInvite(inviteId: string, toUid: string, accepted: boolean, socket: WebSocket, playerName: string)
+        : { success: boolean; partyId?: string; partySize?: number; error?: string } {
+        const invite = this.pendingPartyInvites.get(inviteId);
+        if (!invite || invite.toUid !== toUid) return { success: false, error: 'Undangan tidak valid atau sudah kedaluwarsa' };
+        this.pendingPartyInvites.delete(inviteId);
+        const party = this.partyLobbies.get(invite.partyId);
+        const notifyLeader = (msg: object) => {
+            if (!party) return;
+            const leader = party.members.find(m => m.uid === invite.fromUid);
+            if (leader?.socket.readyState === 1) { try { leader.socket.send(JSON.stringify(msg)); } catch(_) {} }
+        };
+        if (!accepted) {
+            notifyLeader({ type: 'PARTY_INVITE_DECLINED', toName: playerName });
+            return { success: false, error: 'Undangan ditolak' };
+        }
+        if (!party || party.members.length >= 3) {
+            notifyLeader({ type: 'PARTY_INVITE_DECLINED', toName: playerName, reason: 'Party sudah penuh' });
+            return { success: false, error: 'Party sudah penuh' };
+        }
+        party.members.push({ uid: toUid, name: playerName, socket });
+        return { success: true, partyId: invite.partyId, partySize: party.members.length };
+    }
+
+    broadcastPartyUpdate(partyId: string) {
+        const party = this.partyLobbies.get(partyId);
+        if (!party) return;
+        const msg = JSON.stringify({
+            type: 'PARTY_UPDATE', partyId,
+            members: party.members.map(m => ({ uid: m.uid, name: m.name })),
+            leaderId: party.leaderId
+        });
+        party.members.forEach(m => { if (m.socket.readyState === 1) { try { m.socket.send(msg); } catch(_) {} } });
+    }
+
+    disbandParty(partyId: string) {
+        const party = this.partyLobbies.get(partyId);
+        if (!party) return;
+        const msg = JSON.stringify({ type: 'PARTY_DISBANDED' });
+        party.members.forEach(m => { if (m.socket.readyState === 1) { try { m.socket.send(msg); } catch(_) {} } });
+        this.partyLobbies.delete(partyId);
+    }
+
+    leavePartyLobby(partyId: string, uid: string) {
+        const party = this.partyLobbies.get(partyId);
+        if (!party) return;
+        if (party.leaderId === uid) {
+            // Leader keluar → bubarkan party
+            this.disbandParty(partyId);
+        } else {
+            const idx = party.members.findIndex(m => m.uid === uid);
+            if (idx !== -1) party.members.splice(idx, 1);
+            this.broadcastPartyUpdate(partyId);
+        }
+    }
+
+    // Kirim sinyal ke semua anggota untuk masuk antrian dengan partyId bersama
+    startPartyQueue(partyId: string, leaderUid: string): { success: boolean; sharedPartyId?: string; partySize?: number; error?: string } {
+        const party = this.partyLobbies.get(partyId);
+        if (!party) return { success: false, error: 'Party tidak ditemukan' };
+        if (party.leaderId !== leaderUid) return { success: false, error: 'Hanya leader yang bisa memulai antrian' };
+        if (party.members.length < 2) return { success: false, error: 'Party butuh minimal 2 pemain' };
+        const sharedPartyId = `qp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const size = party.members.length;
+        // Beritahu semua anggota untuk segera kirim JOIN_MATCHMAKING dengan sharedPartyId
+        party.members.forEach(m => {
+            this.unregisterOnline(m.uid);
+            if (m.socket.readyState === 1) {
+                try { m.socket.send(JSON.stringify({ type: 'PARTY_QUEUING', sharedPartyId, partySize: size })); } catch(_) {}
+            }
+        });
+        this.partyLobbies.delete(partyId);
+        return { success: true, sharedPartyId, partySize: size };
+    }
+
+    // ============================
+    // BOT SLOT MANAGEMENT
+    // ============================
+    addBotSlotToCustomRoom(roomId: string, level: number, requestingUid: string): { success: boolean; error?: string } {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room || room.started) return { success: false, error: 'Room tidak valid' };
+        if (room.hostUid !== requestingUid) return { success: false, error: 'Hanya host yang bisa menambah bot' };
+        if (room.players.length + room.botSlots.length >= 4) return { success: false, error: 'Room sudah penuh (maks 4 slot)' };
+        if (level < 1 || level > 3) return { success: false, error: 'Level bot harus 1–3' };
+        room.botSlots.push({ level });
+        return { success: true };
+    }
+
+    removeBotSlotFromCustomRoom(roomId: string, slotIndex: number, requestingUid: string): { success: boolean; error?: string } {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room || room.started) return { success: false, error: 'Room tidak valid' };
+        if (room.hostUid !== requestingUid) return { success: false, error: 'Hanya host yang bisa menghapus bot' };
+        if (slotIndex < 0 || slotIndex >= room.botSlots.length) return { success: false, error: 'Slot bot tidak valid' };
+        room.botSlots.splice(slotIndex, 1);
+        return { success: true };
+    }
+
+    // ============================
+    // ONLINE REGISTRY (idle players di home screen)
+    // ============================
+    registerOnline(userUid: string, name: string, socket: WebSocket) {
+        this.onlineRegistry.set(userUid, { name, socket });
+    }
+
+    unregisterOnline(userUid: string) {
+        this.onlineRegistry.delete(userUid);
+    }
+
+    getOnlinePlayers(excludeUid: string): { uid: string; name: string }[] {
+        const result: { uid: string; name: string }[] = [];
+        this.onlineRegistry.forEach((v, uid) => {
+            if (uid !== excludeUid && v.socket.readyState === 1) result.push({ uid, name: v.name });
+        });
+        return result;
+    }
+
+    // ============================
+    // INVITE SYSTEM
+    // ============================
+    invitePlayerToCustomRoom(roomId: string, fromUid: string, toUid: string): { success: boolean; error?: string } {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room || room.started) return { success: false, error: 'Room tidak valid' };
+        if (room.hostUid !== fromUid) return { success: false, error: 'Hanya host yang bisa mengundang' };
+        if (room.players.length + room.botSlots.length >= 4) return { success: false, error: 'Room sudah penuh' };
+        if (room.players.some(p => p.userUid === toUid)) return { success: false, error: 'Pemain sudah ada di room' };
+        const target = this.onlineRegistry.get(toUid);
+        if (!target || target.socket.readyState !== 1) return { success: false, error: 'Pemain tidak tersedia (offline/sibuk)' };
+        const fromPlayer = room.players.find(p => p.userUid === fromUid);
+        const inviteId = `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        this.pendingInvites.set(inviteId, { fromUid, fromName: fromPlayer?.name ?? 'Host', roomId, toUid });
+        try {
+            target.socket.send(JSON.stringify({
+                type: 'ROOM_INVITE', inviteId, roomId,
+                fromName: fromPlayer?.name ?? 'Host'
+            }));
+        } catch (_) {
+            this.pendingInvites.delete(inviteId);
+            return { success: false, error: 'Gagal mengirim undangan' };
+        }
+        // Auto-expire setelah 30 detik
+        setTimeout(() => this.pendingInvites.delete(inviteId), 30000);
+        return { success: true };
+    }
+
+    respondToInvite(inviteId: string, toUid: string, accepted: boolean, socket: WebSocket, playerName: string)
+        : { success: boolean; roomId?: string; playerId?: string; error?: string } {
+        const invite = this.pendingInvites.get(inviteId);
+        if (!invite || invite.toUid !== toUid) return { success: false, error: 'Undangan tidak valid atau sudah kedaluwarsa' };
+        this.pendingInvites.delete(inviteId);
+        // Kirim notifikasi ke host
+        const room = this.pendingCustomRooms.get(invite.roomId);
+        const notifyHost = (msg: object) => {
+            if (!room) return;
+            const hostPlayer = room.players.find(p => p.userUid === invite.fromUid);
+            if (hostPlayer?.socket.readyState === 1) {
+                try { hostPlayer.socket.send(JSON.stringify(msg)); } catch (_) {}
+            }
+        };
+        if (!accepted) {
+            notifyHost({ type: 'INVITE_DECLINED', toName: playerName });
+            return { success: false, error: 'Undangan ditolak' };
+        }
+        const joinResult = this.joinPendingCustomRoom(invite.roomId, playerName, toUid, socket);
+        if (!joinResult.success) {
+            notifyHost({ type: 'INVITE_DECLINED', toName: playerName, reason: joinResult.error });
+            return { success: false, error: joinResult.error };
+        }
+        return { success: true, roomId: invite.roomId, playerId: joinResult.playerId };
     }
 
     leavePendingCustomRoom(roomId: string, userUid: string, isSpectatorRole: boolean) {
@@ -2304,6 +2541,8 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
         // Custom room tracking per socket
         let currentCustomRoomId: string | null = null;
         let isCustomRoomSpectator = false;
+        // Party lobby tracking per socket (Main Online)
+        let currentPartyId: string | null = null;
 
         socket.onopen = () => {
             console.log("🔌 New connection");
@@ -2333,8 +2572,12 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                             name: data.playerName || `Player_${Math.floor(Math.random()*9999)}`,
                             socket, joinTime: Date.now(),
                             userUid: data.userUid || '',
-                            partyId: data.partyId || undefined
+                            partyId: data.partyId || undefined,
+                            partySize: data.partySize ? Math.min(Math.max(parseInt(data.partySize), 2), 3) : undefined
                         };
+                        // Tidak lagi idle — hapus dari online registry
+                        if (data.userUid) matchmaking.unregisterOnline(data.userUid);
+                        currentPartyId = null; // sudah masuk queue, bukan lobby lagi
                         matchmaking.addPlayer(currentPlayer);
                         break;
 
@@ -2534,6 +2777,157 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         }
                         break;
 
+                    // ── Party lobby (Main Online ranked) ────────────────────────────
+                    case 'CREATE_PARTY':
+                        // Pemain buat party di layar Main Online
+                        if (data.userUid && data.playerName && !currentPartyId) {
+                            if (!currentPlayer) {
+                                currentPlayer = { id: data.userUid, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                            }
+                            matchmaking.unregisterOnline(data.userUid);
+                            currentPartyId = matchmaking.createPartyLobby(data.userUid, data.playerName, socket);
+                            socket.send(JSON.stringify({ type: 'PARTY_CREATED', partyId: currentPartyId }));
+                            matchmaking.broadcastPartyUpdate(currentPartyId);
+                        }
+                        break;
+
+                    case 'INVITE_TO_PARTY':
+                        // Leader undang teman online ke party
+                        if (currentPartyId && currentPlayer?.userUid && data.targetUid) {
+                            const pInvRes = matchmaking.inviteToParty(currentPartyId, currentPlayer.userUid, data.targetUid);
+                            if (pInvRes.success) {
+                                socket.send(JSON.stringify({ type: 'PARTY_INVITE_SENT', targetUid: data.targetUid }));
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: pInvRes.error }));
+                            }
+                        }
+                        break;
+
+                    case 'PARTY_INVITE_RESPONSE':
+                        // Target terima / tolak undangan party
+                        if (data.inviteId && data.userUid) {
+                            const pName = currentPlayer?.name || data.playerName || 'Player';
+                            const pRespRes = matchmaking.respondToPartyInvite(data.inviteId, data.userUid, !!data.accepted, socket, pName);
+                            if (data.accepted && pRespRes.success) {
+                                currentPartyId = pRespRes.partyId!;
+                                if (!currentPlayer) {
+                                    currentPlayer = { id: data.userUid, name: pName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                }
+                                matchmaking.unregisterOnline(data.userUid);
+                                matchmaking.broadcastPartyUpdate(pRespRes.partyId!);
+                                socket.send(JSON.stringify({ type: 'PARTY_JOINED', partyId: pRespRes.partyId }));
+                            } else if (!data.accepted) {
+                                // Penolakan sudah diteruskan ke leader di respondToPartyInvite
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: pRespRes.error }));
+                            }
+                        }
+                        break;
+
+                    case 'START_PARTY_QUEUE':
+                        // Leader mulai antrian — server kirim PARTY_QUEUING ke semua anggota,
+                        // lalu masing-masing client kirim JOIN_MATCHMAKING dengan sharedPartyId
+                        if (currentPartyId && currentPlayer?.userUid) {
+                            const sqRes = matchmaking.startPartyQueue(currentPartyId, currentPlayer.userUid);
+                            if (!sqRes.success) {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: sqRes.error }));
+                            }
+                            // currentPartyId di-clear setelah PARTY_QUEUING diterima client
+                            // dan client kirim JOIN_MATCHMAKING (handler di atas yang set null)
+                            currentPartyId = null;
+                        }
+                        break;
+
+                    case 'LEAVE_PARTY':
+                        if (currentPartyId && currentPlayer?.userUid) {
+                            matchmaking.leavePartyLobby(currentPartyId, currentPlayer.userUid);
+                            currentPartyId = null;
+                            // Kembali ke registry agar bisa diundang lagi
+                            if (currentPlayer.userUid && currentPlayer.name) {
+                                matchmaking.registerOnline(currentPlayer.userUid, currentPlayer.name, socket);
+                            }
+                        }
+                        break;
+
+                    // ── Online registry ──────────────────────────────────────────────
+                    case 'REGISTER_ONLINE':
+                        // Client kirim ini saat ada di home screen (idle)
+                        if (data.userUid && data.playerName) {
+                            matchmaking.registerOnline(data.userUid, data.playerName, socket);
+                            if (!currentPlayer) {
+                                // Simpan identitas dasar agar onclose bisa cleanup
+                                currentPlayer = { id: data.userUid, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                            }
+                        }
+                        break;
+
+                    case 'GET_ONLINE_PLAYERS':
+                        // Kembalikan daftar pemain yang sedang idle (bisa diundang)
+                        if (data.userUid) {
+                            const onlineList = matchmaking.getOnlinePlayers(data.userUid);
+                            socket.send(JSON.stringify({ type: 'ONLINE_PLAYERS', players: onlineList }));
+                        }
+                        break;
+
+                    // ── Bot slot management ─────────────────────────────────────────
+                    case 'ADD_BOT_SLOT':
+                        if (currentCustomRoomId && currentPlayer?.userUid) {
+                            const level = Math.min(Math.max(parseInt(data.level) || 1, 1), 3);
+                            const addRes = matchmaking.addBotSlotToCustomRoom(currentCustomRoomId, level, currentPlayer.userUid);
+                            if (addRes.success) {
+                                matchmaking.broadcastPendingCustomRoomUpdate(currentCustomRoomId);
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: addRes.error }));
+                            }
+                        }
+                        break;
+
+                    case 'REMOVE_BOT_SLOT':
+                        if (currentCustomRoomId && currentPlayer?.userUid) {
+                            const slotIdx = parseInt(data.slotIndex) ?? 0;
+                            const remRes = matchmaking.removeBotSlotFromCustomRoom(currentCustomRoomId, slotIdx, currentPlayer.userUid);
+                            if (remRes.success) {
+                                matchmaking.broadcastPendingCustomRoomUpdate(currentCustomRoomId);
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: remRes.error }));
+                            }
+                        }
+                        break;
+
+                    // ── Invite system ────────────────────────────────────────────────
+                    case 'INVITE_TO_ROOM':
+                        // Host mengundang pemain online ke custom room
+                        if (currentCustomRoomId && currentPlayer?.userUid && data.targetUid) {
+                            const invRes = matchmaking.invitePlayerToCustomRoom(currentCustomRoomId, currentPlayer.userUid, data.targetUid);
+                            if (invRes.success) {
+                                socket.send(JSON.stringify({ type: 'INVITE_SENT', targetUid: data.targetUid }));
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: invRes.error }));
+                            }
+                        }
+                        break;
+
+                    case 'INVITE_RESPONSE':
+                        // Target menjawab undangan: accepted=true/false
+                        if (data.inviteId && data.userUid) {
+                            const pName = currentPlayer?.name || data.playerName || 'Player';
+                            const respRes = matchmaking.respondToInvite(data.inviteId, data.userUid, !!data.accepted, socket, pName);
+                            if (data.accepted && respRes.success) {
+                                // Daftarkan sebagai currentPlayer & masuk room
+                                currentPlayer = { id: respRes.playerId!, name: pName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                currentCustomRoomId = respRes.roomId!;
+                                // Hapus dari registry — tidak lagi idle
+                                matchmaking.unregisterOnline(data.userUid);
+                                matchmaking.broadcastPendingCustomRoomUpdate(respRes.roomId!);
+                                socket.send(JSON.stringify({ type: 'INVITE_ACCEPTED', roomId: respRes.roomId, playerId: respRes.playerId }));
+                            } else if (!data.accepted) {
+                                // Penolakan sudah dinotifikasi ke host di respondToInvite
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: respRes.error }));
+                            }
+                        }
+                        break;
+
                     default:
                         console.log(`❓ Unknown: ${data.type}`);
                 }
@@ -2563,7 +2957,15 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                 }
             }
 
+            // Cleanup party lobby jika masih di dalamnya
+            if (currentPartyId && currentPlayer?.userUid) {
+                matchmaking.leavePartyLobby(currentPartyId, currentPlayer.userUid);
+                currentPartyId = null;
+            }
+
             if (currentPlayer) {
+                // Hapus dari online registry (idle) jika terdaftar
+                if (currentPlayer.userUid) matchmaking.unregisterOnline(currentPlayer.userUid);
                 matchmaking.removePlayer(currentPlayer.id);
                 // Tunda auto-mode 5 detik agar player punya waktu reconnect.
                 // Timer disimpan di Map agar bisa dibatalkan jika player berhasil rejoin sebelum 5 detik.
