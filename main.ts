@@ -941,25 +941,17 @@ class GameEngine {
                 byRarity[c.rarity].push(c);
             }
 
-            // Bangun daftar rarity yang tersedia beserta bobotnya
-            let totalWeight = 0;
-            const weighted: { rarity: string; weight: number }[] = [];
-            for (const rarity of RARITY_ORDER) {
-                if (byRarity[rarity]?.length) {
-                    const w = rateTable[rarity] ?? 0;
-                    weighted.push({ rarity, weight: w });
-                    totalWeight += w;
-                }
-            }
+            // Greedy: pilih rarity dengan rate tertinggi (level) yang masih ada stoknya
+            // Jika ada seri (rate sama), pilih acak di antara yang seri
+            // Stok = syarat masuk saja, tidak memengaruhi persentase
+            const available = RARITY_ORDER
+                .filter(r => byRarity[r]?.length && (rateTable[r] ?? 0) > 0)
+                .sort((a, b) => (rateTable[b] ?? 0) - (rateTable[a] ?? 0));
 
-            if (totalWeight > 0) {
-                // Pilih rarity secara weighted random
-                let rand = Math.random() * totalWeight;
-                let chosenRarity = weighted[weighted.length - 1].rarity;
-                for (const { rarity, weight } of weighted) {
-                    rand -= weight;
-                    if (rand <= 0) { chosenRarity = rarity; break; }
-                }
+            if (available.length > 0) {
+                const topRate = rateTable[available[0]] ?? 0;
+                const topRarities = available.filter(r => (rateTable[r] ?? 0) === topRate);
+                const chosenRarity = topRarities[Math.floor(Math.random() * topRarities.length)];
                 // Pilih kartu acak dari rarity terpilih
                 const pool = byRarity[chosenRarity];
                 if (pool?.length) {
@@ -2048,8 +2040,24 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
     if (req.headers.get("upgrade") === "websocket") {
         const { socket, response } = Deno.upgradeWebSocket(req);
         let currentPlayer: Player | null = null;
+        let lastPong = Date.now();
+        let pingInterval: ReturnType<typeof setInterval> | undefined;
 
-        socket.onopen = () => console.log("🔌 New connection");
+        socket.onopen = () => {
+            console.log("🔌 New connection");
+            lastPong = Date.now();
+            pingInterval = setInterval(() => {
+                if (socket.readyState !== 1) { clearInterval(pingInterval); return; }
+                // Tidak ada PONG lebih dari 45 detik → koneksi mati, tutup paksa
+                if (Date.now() - lastPong > 45000) {
+                    console.log(`⏰ Ping timeout: ${currentPlayer?.name || 'unknown'}`);
+                    clearInterval(pingInterval);
+                    try { socket.close(); } catch(_) {}
+                    return;
+                }
+                try { socket.send(JSON.stringify({ type: 'PING' })); } catch(_) { clearInterval(pingInterval); }
+            }, 20000); // kirim PING setiap 20 detik
+        };
 
         socket.onmessage = (event) => {
             try {
@@ -2136,7 +2144,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         break;
 
                     case 'PONG':
-                        // Keepalive dari client — tidak ada aksi, abaikan diam-diam
+                        lastPong = Date.now(); // catat waktu PONG terakhir untuk deteksi koneksi mati
                         break;
 
                     case 'REJOIN_ROOM':
@@ -2217,6 +2225,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
         };
 
         socket.onclose = () => {
+            clearInterval(pingInterval);
             console.log(`🔌 Disconnected: ${currentPlayer?.name || 'unknown'}`);
             if (currentPlayer) {
                 matchmaking.removePlayer(currentPlayer.id);
@@ -2231,7 +2240,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
             }
         };
 
-        socket.onerror = (e) => console.error("❌ WS Error:", e);
+        socket.onerror = (e) => { clearInterval(pingInterval); console.error("❌ WS Error:", e); };
 
         return response;
     }
