@@ -1129,7 +1129,44 @@ class GameEngine {
 
     private botPlayPhase1(bot: GamePlayer) {
         if (bot.hasPlayed || bot.hand.length === 0) return;
-        const card = [...bot.hand].sort((a, b) => a.power - b.power)[0];
+        const level = bot.botLevel ?? 1;
+        let card: Card;
+
+        if (level === 1) {
+            // Level 1 (Bronze): kartu acak — simulasi pemain pemula, tidak ada strategi
+            card = bot.hand[Math.floor(Math.random() * bot.hand.length)];
+        } else if (level === 2) {
+            // Level 2 (Gold): pilih provinsi dengan kartu terbanyak di tangan,
+            // lalu mainkan power terkecil dari provinsi itu (hemat high-power untuk Phase 1 berikutnya)
+            const byProvince: Record<string, Card[]> = {};
+            for (const c of bot.hand) {
+                if (!byProvince[c.province]) byProvince[c.province] = [];
+                byProvince[c.province].push(c);
+            }
+            const bestProvince = Object.entries(byProvince)
+                .sort((a, b) => b[1].length - a[1].length)[0][0];
+            card = byProvince[bestProvince].sort((a, b) => a.power - b.power)[0];
+        } else {
+            // Level 3 (Platinum): pilih provinsi terbanyak di tangan bot,
+            // jika seri → pilih provinsi yang paling sedikit dimiliki lawan (paksa mereka draw/force pick),
+            // lalu mainkan power terkecil dari provinsi itu
+            const byProvince: Record<string, Card[]> = {};
+            for (const c of bot.hand) {
+                if (!byProvince[c.province]) byProvince[c.province] = [];
+                byProvince[c.province].push(c);
+            }
+            const opponents = this.gs.players.filter(p => p.id !== bot.id && !p.winner);
+            const sorted = Object.entries(byProvince).sort((a, b) => {
+                if (b[1].length !== a[1].length) return b[1].length - a[1].length;
+                // Tiebreak: pilih provinsi yang paling sedikit dimiliki lawan
+                const oppA = opponents.reduce((sum, p) => sum + p.hand.filter(c => c.province === a[0]).length, 0);
+                const oppB = opponents.reduce((sum, p) => sum + p.hand.filter(c => c.province === b[0]).length, 0);
+                return oppA - oppB;
+            });
+            const bestProvince = sorted[0][0];
+            card = byProvince[bestProvince].sort((a, b) => a.power - b.power)[0];
+        }
+
         this.gs.currentProvince = card.province;
         this.gs.topCard = [card];
         bot.hand.splice(bot.hand.findIndex(c => c.id === card.id), 1);
@@ -1207,11 +1244,15 @@ class GameEngine {
         }
         const matching = bot.hand.filter(c => c.province === this.gs.currentProvince);
         if (matching.length > 0) {
-            // Level 1: mainkan kartu power terbesar (desc). Level 2 & 3: terkecil (asc).
+            // Level 1 (Bronze): mainkan kartu acak — pemula tidak punya strategi
+            // Level 2 & 3 (Gold/Platinum): mainkan power terkecil dulu (hemat high-power untuk Phase 1)
             const level = bot.botLevel ?? 1;
-            const sortedMatching = level === 1
-                ? [...matching].sort((a,b) => b.power - a.power)
-                : [...matching].sort((a,b) => a.power - b.power);
+            let sortedMatching: Card[];
+            if (level === 1) {
+                sortedMatching = [...matching].sort(() => Math.random() - 0.5);
+            } else {
+                sortedMatching = [...matching].sort((a, b) => a.power - b.power);
+            }
             const playable = sortedMatching.filter(c => !this.gs.topCard.some(t => t.id === c.id));
             if (playable.length > 0) {
                 const card = playable[0];
