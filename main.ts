@@ -772,6 +772,11 @@ class GameEngine {
     roomId: string;
     onGameOver?: () => void;
     selectedProvinces: string[] = [];
+    isCustomRoom: boolean = false;
+    spectatorSockets: WebSocket[] = [];
+
+    addSpectator(socket: WebSocket) { this.spectatorSockets.push(socket); }
+    removeSpectator(socket: WebSocket) { this.spectatorSockets = this.spectatorSockets.filter(s => s !== socket); }
 
     setSelectedProvinces(provinces: string[]) {
         this.selectedProvinces = provinces;
@@ -859,7 +864,7 @@ class GameEngine {
             // Simpan stats segera saat pemain menang (mirip pola handleSurrender).
             // Dilakukan di sini karena socket masih terbuka — STATS_SAVED / SAVE_STATS_CLIENT
             // masih bisa dikirim ke client. Flag statsSaved mencegah double-save di endGame().
-            if (!player.isBot && player.userUid && player.userUid !== "BOT" && !player.statsSaved) {
+            if (!player.isBot && player.userUid && player.userUid !== "BOT" && !player.statsSaved && !this.isCustomRoom) {
                 player.statsSaved = true;
                 const _p = player;
                 savePlayerStats(_p.userUid, _p.name, _p.rank).then(ok => {
@@ -1471,7 +1476,7 @@ class GameEngine {
         // Simpan stats langsung saat menyerah — socket masih terbuka, sehingga
         // SAVE_STATS_CLIENT bisa dikirim ke client jika server-save gagal.
         // Flag statsSaved = true (optimistic) mencegah double-save di endGame().
-        if (player.userUid && player.userUid !== "BOT") {
+        if (player.userUid && player.userUid !== "BOT" && !this.isCustomRoom) {
             player.statsSaved = true;
             const _p = player;
             savePlayerStats(_p.userUid, _p.name, _p.rank).then(ok => {
@@ -1580,7 +1585,7 @@ class GameEngine {
         // Server-side: simpan stats + rank setiap pemain manusia
         // Kirim STATS_SAVED jika berhasil, SAVE_STATS_CLIENT jika gagal (fallback ke client)
         this.gs.players
-            .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved)
+            .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved && !this.isCustomRoom)
             .forEach(p => {
                 const sock = p.socket;
                 savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
@@ -1630,7 +1635,7 @@ class GameEngine {
         // Kasus: pemain menang (checkWin) lalu langsung LEAVE_MATCH sebelum savePlayerStats selesai,
         // atau koneksi putus sebelum endGame() dipanggil.
         this.gs.players
-            .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved && p.winner && p.rank > 0)
+            .filter(p => !p.isBot && p.userUid && p.userUid !== "BOT" && !p.statsSaved && p.winner && p.rank > 0 && !this.isCustomRoom)
             .forEach(p => {
                 p.statsSaved = true;
                 savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
@@ -1638,6 +1643,8 @@ class GameEngine {
                     console.log(`${ok ? '✅' : '⚠️'} cleanupMatch saveStats uid=${p.userUid} pos=${p.rank}`);
                 });
             });
+        // Bersihkan referensi spectator socket agar tidak memory leak
+        this.spectatorSockets = [];
     }
 
     getFullState() {
@@ -1689,6 +1696,9 @@ class GameEngine {
                 try { p.socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state })); } catch(e) {}
             }
         });
+        this.spectatorSockets.forEach(s => {
+            if (s.readyState === 1) { try { s.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state, isSpectator: true })); } catch(e) {} }
+        });
     }
 
     private broadcastLog(message: string) {
@@ -1704,6 +1714,9 @@ class GameEngine {
     broadcastToAll(message: any) {
         this.gs.players.forEach(p => {
             if (!p.isBot && p.socket) { try { p.socket.send(JSON.stringify(message)); } catch(e) {} }
+        });
+        this.spectatorSockets.forEach(s => {
+            if (s.readyState === 1) { try { s.send(JSON.stringify(message)); } catch(e) {} }
         });
     }
 
@@ -1811,6 +1824,14 @@ interface GameRoom {
     gameEngine: GameEngine;
     createdAt: number;
     finishedAt?: number;
+}
+
+interface CustomRoomSlot { id: string; name: string; socket: WebSocket; userUid: string; }
+interface PendingCustomRoom {
+    id: string; hostUid: string; hostRole: 'pemain' | 'penonton';
+    players: CustomRoomSlot[];
+    spectatorSocket?: WebSocket; spectatorName?: string; spectatorUid?: string;
+    started: boolean; createdAt: number;
 }
 
 class MatchmakingQueue {
@@ -2039,8 +2060,11 @@ class MatchmakingQueue {
     // Cleanup room yang sudah 'finished' (5 menit) atau stuck di 'playing'/'starting' (2 jam)
     cleanupFinishedRooms() {
         const now = Date.now();
-        const MAX_FINISHED_AGE  = 5 * 60 * 1000;        // 5 menit setelah selesai
+        const MAX_FINISHED_AGE  = 5 * 60 * 1000;        // 5 menit setelah selesai (ranked)
         const MAX_PLAYING_AGE   = 2 * 60 * 60 * 1000;   // 2 jam — mencegah memory leak room stuck
+
+        // Cleanup active/finished game rooms (ranked)
+        // Custom room sudah di-delete oleh onGameOver callback setelah 60 detik
         this.rooms.forEach((room, roomId) => {
             if (room.status === 'finished') {
                 const finishedTime = room.finishedAt ?? room.createdAt;
@@ -2055,6 +2079,9 @@ class MatchmakingQueue {
                 this.rooms.delete(roomId);
             }
         });
+
+        // Pending custom rooms dibersihkan secara event-driven di leavePendingCustomRoom
+        // (saat semua socket mati / semua player keluar). Tidak perlu timer di sini.
     }
 
     getStats() {
@@ -2082,6 +2109,147 @@ class MatchmakingQueue {
             if (player) return { roomId, playerId: player.id, playerName: player.name };
         }
         return null;
+    }
+
+    // ============================
+    // CUSTOM ROOM (KOSTUM)
+    // ============================
+    private pendingCustomRooms: Map<string, PendingCustomRoom> = new Map();
+
+    getPendingCustomRoom(roomId: string): PendingCustomRoom | undefined {
+        return this.pendingCustomRooms.get(roomId);
+    }
+
+    createPendingCustomRoom(hostName: string, hostUid: string, hostRole: 'pemain' | 'penonton', hostSocket: WebSocket): { roomId: string; hostPlayerId?: string } {
+        // Pastikan roomId unik (sangat jarang collision tapi defensif)
+        let roomId: string;
+        do { roomId = `cr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
+        while (this.pendingCustomRooms.has(roomId) || this.rooms.has(roomId));
+        const entry: PendingCustomRoom = { id: roomId, hostUid, hostRole, players: [], started: false, createdAt: Date.now() };
+        let hostPlayerId: string | undefined;
+        if (hostRole === 'pemain') {
+            hostPlayerId = `crp_${Date.now()}`;
+            entry.players.push({ id: hostPlayerId, name: hostName, socket: hostSocket, userUid: hostUid });
+        } else {
+            entry.spectatorSocket = hostSocket;
+            entry.spectatorName = hostName;
+            entry.spectatorUid = hostUid;
+        }
+        this.pendingCustomRooms.set(roomId, entry);
+        console.log(`🎭 Custom room dibuat: ${roomId} | ${hostName} (${hostRole})`);
+        return { roomId, hostPlayerId };
+    }
+
+    joinPendingCustomRoom(roomId: string, playerName: string, playerUid: string, socket: WebSocket): { success: boolean; playerId?: string; error?: string } {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room) {
+            // Room mungkin sudah pindah ke this.rooms karena game sudah dimulai
+            const startedRoom = this.rooms.get(roomId);
+            if (startedRoom) return { success: false, error: 'Pertandingan sudah dimulai' };
+            return { success: false, error: 'Room tidak ditemukan' };
+        }
+        if (room.started) return { success: false, error: 'Pertandingan sudah dimulai' };
+        if (room.players.length >= 4) return { success: false, error: 'Room sudah penuh (4 pemain)' };
+        // Cegah player yang sama masuk dua kali (misal dua tab browser)
+        if (room.players.some(p => p.userUid === playerUid)) return { success: false, error: 'Kamu sudah ada di room ini' };
+        let pid: string;
+        do { pid = `crp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`; }
+        while (room.players.some(p => p.id === pid));
+        room.players.push({ id: pid, name: playerName, socket, userUid: playerUid });
+        return { success: true, playerId: pid };
+    }
+
+    broadcastPendingCustomRoomUpdate(roomId: string) {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room) return;
+        const slots = room.players.map((p, i) => ({ slot: i + 1, name: p.name, uid: p.userUid }));
+        const msg = JSON.stringify({ type: 'CUSTOM_ROOM_UPDATE', roomId, slots, hostRole: room.hostRole });
+        room.players.forEach(p => { if (p.socket.readyState === 1) { try { p.socket.send(msg); } catch(_) {} } });
+        if (room.spectatorSocket?.readyState === 1) { try { room.spectatorSocket.send(msg); } catch(_) {} }
+    }
+
+    startCustomRoomGame(roomId: string): boolean {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room || room.started || room.players.length < 2) return false;
+        room.started = true;
+
+        try {
+            const gameEngine = new GameEngine(roomId);
+            gameEngine.isCustomRoom = true;
+            if (room.spectatorSocket) gameEngine.addSpectator(room.spectatorSocket);
+
+            const MANDATORY_PROVINCE = 'Bangka Belitung';
+            const otherProvinces = ALL_PROVINCES.filter(p => p.name !== MANDATORY_PROVINCE);
+            const shuffled = [...otherProvinces].sort(() => Math.random() - 0.5).slice(0, 14);
+            const selectedProvinces = [MANDATORY_PROVINCE, ...shuffled.map(p => p.name)];
+            gameEngine.setSelectedProvinces(selectedProvinces);
+
+            room.players.forEach(p => gameEngine.addPlayer({ id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid }));
+
+            const gameRoom: GameRoom = {
+                id: roomId,
+                players: room.players.map(p => ({ id: p.id, name: p.name, socket: p.socket, joinTime: Date.now(), userUid: p.userUid })),
+                bots: 0, status: 'starting', gameEngine, createdAt: Date.now()
+            };
+            this.rooms.set(roomId, gameRoom);
+            this.pendingCustomRooms.delete(roomId); // hapus dari pending hanya jika setup berhasil
+            gameEngine.onGameOver = () => {
+                gameRoom.status = 'finished';
+                gameRoom.finishedAt = Date.now();
+                // Custom room tidak perlu disimpan lama — hapus dari memori setelah 60 detik
+                // (cukup waktu untuk semua message game-over sampai ke client)
+                setTimeout(() => { this.rooms.delete(roomId); }, 60_000);
+            };
+
+            const provincesMsg = JSON.stringify({ type: 'PROVINCES_SELECTED', provinces: selectedProvinces, mandatory: MANDATORY_PROVINCE });
+            room.players.forEach(p => { if (p.socket.readyState === 1) { try { p.socket.send(provincesMsg); } catch(_) {} } });
+            if (room.spectatorSocket?.readyState === 1) { try { room.spectatorSocket.send(provincesMsg); } catch(_) {} }
+
+            setTimeout(() => {
+                gameRoom.status = 'playing';
+                gameEngine.startGame();
+                const state = gameEngine.getFullState();
+                room.players.forEach(p => {
+                    if (p.socket.readyState === 1) {
+                        try { p.socket.send(JSON.stringify({ type: 'GAME_STARTED', roomId, playerId: p.id, state, isCustomRoom: true })); } catch(_) {}
+                    }
+                });
+                if (room.spectatorSocket?.readyState === 1) {
+                    try { room.spectatorSocket.send(JSON.stringify({ type: 'GAME_STARTED', roomId, playerId: null, isSpectator: true, state, isCustomRoom: true })); } catch(_) {}
+                }
+            }, 6000);
+
+            console.log(`🎭 Custom room game started: ${roomId} | ${room.players.length} pemain`);
+            return true;
+        } catch (error) {
+            // Rollback: biarkan room tetap di pendingCustomRooms agar bisa dicoba lagi
+            console.error(`❌ Gagal start custom room ${roomId}:`, error);
+            room.started = false;
+            this.rooms.delete(roomId);
+            return false;
+        }
+    }
+
+    leavePendingCustomRoom(roomId: string, userUid: string, isSpectatorRole: boolean) {
+        const room = this.pendingCustomRooms.get(roomId);
+        if (!room || room.started) return;
+        if (isSpectatorRole) {
+            room.spectatorSocket = undefined;
+        } else {
+            const idx = room.players.findIndex(p => p.userUid === userUid);
+            if (idx !== -1) room.players.splice(idx, 1);
+        }
+        // Hapus room jika:
+        // 1. Tidak ada pemain sama sekali DAN tidak ada spectator, ATAU
+        // 2. Semua socket yang tersisa sudah mati (disconnect tanpa kirim LEAVE)
+        const hasLivePlayer = room.players.some(p => p.socket.readyState === 1);
+        const hasLiveSpectator = room.spectatorSocket != null && room.spectatorSocket.readyState === 1;
+        if (!hasLivePlayer && !hasLiveSpectator) {
+            this.pendingCustomRooms.delete(roomId);
+            console.log(`🗑️ Pending custom room dihapus: ${roomId}`);
+        } else {
+            this.broadcastPendingCustomRoomUpdate(roomId);
+        }
     }
 }
 
@@ -2133,6 +2301,9 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
         let currentPlayer: Player | null = null;
         let lastPong = Date.now();
         let pingInterval: ReturnType<typeof setInterval> | undefined;
+        // Custom room tracking per socket
+        let currentCustomRoomId: string | null = null;
+        let isCustomRoomSpectator = false;
 
         socket.onopen = () => {
             console.log("🔌 New connection");
@@ -2202,7 +2373,9 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         break;
 
                     case 'SURRENDER':
-                        if (currentPlayer && data.roomId) {
+                        if (isCustomRoomSpectator) {
+                            socket.send(JSON.stringify({ type: 'ERROR', message: 'Spectator tidak dapat menyerah.' }));
+                        } else if (currentPlayer && data.roomId) {
                             const room = matchmaking.getRoom(data.roomId);
                             if (room) room.gameEngine.handleSurrender(currentPlayer.id);
                         }
@@ -2308,6 +2481,59 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         }
                         break;
 
+                    case 'CREATE_CUSTOM_ROOM':
+                        if (currentCustomRoomId || (data.userUid && matchmaking.findRoomByUserUid(data.userUid))) {
+                            socket.send(JSON.stringify({ type: 'ERROR', message: 'Sudah berada di room lain. Keluar dulu.' }));
+                        } else if (data.playerName && data.userUid && (data.role === 'pemain' || data.role === 'penonton')) {
+                            const crResult = matchmaking.createPendingCustomRoom(data.playerName, data.userUid, data.role, socket);
+                            currentCustomRoomId = crResult.roomId;
+                            isCustomRoomSpectator = data.role === 'penonton';
+                            if (data.role === 'pemain' && crResult.hostPlayerId) {
+                                currentPlayer = { id: crResult.hostPlayerId, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                            }
+                            socket.send(JSON.stringify({ type: 'CUSTOM_ROOM_CREATED', roomId: crResult.roomId }));
+                        }
+                        break;
+
+                    case 'JOIN_CUSTOM_ROOM':
+                        if (currentCustomRoomId || (data.userUid && matchmaking.findRoomByUserUid(data.userUid))) {
+                            socket.send(JSON.stringify({ type: 'ERROR', message: 'Sudah berada di room lain. Keluar dulu.' }));
+                        } else if (data.roomId && data.playerName && data.userUid) {
+                            const joinResult = matchmaking.joinPendingCustomRoom(data.roomId, data.playerName, data.userUid, socket);
+                            if (joinResult.success) {
+                                currentPlayer = { id: joinResult.playerId!, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                currentCustomRoomId = data.roomId;
+                                matchmaking.broadcastPendingCustomRoomUpdate(data.roomId);
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: joinResult.error || 'Gagal bergabung' }));
+                            }
+                        } else {
+                            socket.send(JSON.stringify({ type: 'ERROR', message: 'Data tidak lengkap untuk bergabung ke room.' }));
+                        }
+                        break;
+
+                    case 'START_CUSTOM_ROOM':
+                        if (currentCustomRoomId) {
+                            const crPending = matchmaking.getPendingCustomRoom(currentCustomRoomId);
+                            if (!crPending) {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan.' }));
+                            } else if (crPending.hostUid !== (currentPlayer?.userUid || data.userUid)) {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: 'Hanya host yang bisa memulai pertandingan.' }));
+                            } else {
+                                const started = matchmaking.startCustomRoomGame(currentCustomRoomId);
+                                if (!started) socket.send(JSON.stringify({ type: 'ERROR', message: 'Gagal memulai. Minimal 2 pemain.' }));
+                            }
+                        }
+                        break;
+
+                    case 'LEAVE_CUSTOM_ROOM':
+                        if (currentCustomRoomId) {
+                            matchmaking.leavePendingCustomRoom(currentCustomRoomId, currentPlayer?.userUid || data.userUid || '', isCustomRoomSpectator);
+                            currentCustomRoomId = null;
+                            isCustomRoomSpectator = false;
+                        }
+                        break;
+
                     default:
                         console.log(`❓ Unknown: ${data.type}`);
                 }
@@ -2319,6 +2545,24 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
         socket.onclose = () => {
             clearInterval(pingInterval);
             console.log(`🔌 Disconnected: ${currentPlayer?.name || 'unknown'}`);
+
+            if (currentCustomRoomId) {
+                const pendingRoom = matchmaking.getPendingCustomRoom(currentCustomRoomId);
+                const activeRoom = matchmaking.getRoom(currentCustomRoomId);
+
+                if (pendingRoom && !pendingRoom.started) {
+                    // Masih di lobby, belum mulai game — keluarkan dari pending room
+                    matchmaking.leavePendingCustomRoom(currentCustomRoomId, currentPlayer?.userUid || '', isCustomRoomSpectator);
+                } else if (activeRoom?.gameEngine) {
+                    // Game sudah berjalan
+                    if (isCustomRoomSpectator) {
+                        // Spectator disconnect: cukup hapus dari gameEngine
+                        activeRoom.gameEngine.removeSpectator(socket);
+                    }
+                    // Untuk pemain biasa di custom room, auto-mode timer di bawah menangani disconnect
+                }
+            }
+
             if (currentPlayer) {
                 matchmaking.removePlayer(currentPlayer.id);
                 // Tunda auto-mode 5 detik agar player punya waktu reconnect.
