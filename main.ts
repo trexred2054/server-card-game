@@ -1974,10 +1974,24 @@ class MatchmakingQueue {
             }
         });
     }
+
+    // Cari room aktif berdasarkan userUid — untuk support login di device berbeda
+    findRoomByUserUid(userUid: string): { roomId: string; playerId: string; playerName: string } | null {
+        if (!userUid || userUid === 'BOT') return null;
+        for (const [roomId, room] of this.rooms) {
+            if (room.status !== 'playing' && room.status !== 'starting') continue;
+            const player = room.gameEngine.gs.players.find(p => !p.isBot && p.userUid === userUid);
+            if (player) return { roomId, playerId: player.id, playerName: player.name };
+        }
+        return null;
+    }
 }
 
 const matchmaking = new MatchmakingQueue();
 setInterval(() => matchmaking.cleanupFinishedRooms(), 60000);
+
+// Track timer auto-mode yang pending per playerId agar bisa dibatalkan saat rejoin
+const pendingAutoModeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 console.log(`🎮 Card Game Nusantara Server v2`);
 console.log(`📦 Total kartu: ${ALL_CARDS.length} (${ALL_PROVINCES.length} provinsi × 10) | Per match: 7 provinsi × 10 = 70 kartu`);
@@ -2094,12 +2108,30 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         }
                         break;
 
+                    case 'FIND_MY_ROOM':
+                        // Cari room aktif berdasarkan userUid — untuk login di device berbeda
+                        if (data.userUid) {
+                            const found = matchmaking.findRoomByUserUid(data.userUid);
+                            if (found) {
+                                socket.send(JSON.stringify({ type: 'ROOM_FOUND', ...found }));
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ROOM_NOT_FOUND' }));
+                            }
+                        }
+                        break;
+
                     case 'PONG':
                         // Keepalive dari client — tidak ada aksi, abaikan diam-diam
                         break;
 
                     case 'REJOIN_ROOM':
                         if (data.roomId && data.playerId) {
+                            // Batalkan timer auto-mode yang mungkin masih pending dari disconnect sebelumnya
+                            const pendingTimer = pendingAutoModeTimers.get(data.playerId);
+                            if (pendingTimer) {
+                                clearTimeout(pendingTimer);
+                                pendingAutoModeTimers.delete(data.playerId);
+                            }
                             const success = matchmaking.rejoinRoom(
                                 data.roomId, data.playerId, data.playerName || 'Player',
                                 data.userUid || '',
@@ -2110,8 +2142,25 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                 const room = matchmaking.getRoom(data.roomId);
                                 if (room) {
                                     room.gameEngine.setPlayerAutoMode(data.playerId, false);
-                                    socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: room.gameEngine.getFullState() }));
-                                    console.log(`🔄 ${data.playerId} rejoined ${data.roomId}`);
+                                    if (room.status === 'playing') {
+                                        // Kirim GAME_STARTED agar client tahu harus masuk ke layar game,
+                                        // bukan GAME_STATE_UPDATE yang mungkin diabaikan client di layar provinsi
+                                        socket.send(JSON.stringify({
+                                            type: 'GAME_STARTED',
+                                            roomId: data.roomId,
+                                            playerId: data.playerId,
+                                            state: room.gameEngine.getFullState()
+                                        }));
+                                    } else {
+                                        // Status 'starting' — kirim ulang info provinsi + state terkini
+                                        socket.send(JSON.stringify({
+                                            type: 'PROVINCES_SELECTED',
+                                            provinces: room.gameEngine.selectedProvinces,
+                                            mandatory: 'Bangka Belitung'
+                                        }));
+                                        socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: room.gameEngine.getFullState() }));
+                                    }
+                                    console.log(`🔄 ${data.playerId} rejoined ${data.roomId} (status: ${room.status})`);
                                 }
                             } else {
                                 // Cek apakah room sudah finished — kirim ulang GAME_OVER agar client bisa simpan stats
@@ -2156,10 +2205,14 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
             console.log(`🔌 Disconnected: ${currentPlayer?.name || 'unknown'}`);
             if (currentPlayer) {
                 matchmaking.removePlayer(currentPlayer.id);
-                // Tunda auto-mode 5 detik agar player punya waktu reconnect
-                setTimeout(() => {
-                    matchmaking.setPlayerAutoModeInAllRooms(currentPlayer!.id, true);
+                // Tunda auto-mode 5 detik agar player punya waktu reconnect.
+                // Timer disimpan di Map agar bisa dibatalkan jika player berhasil rejoin sebelum 5 detik.
+                const capturedId = currentPlayer.id;
+                const autoTimer = setTimeout(() => {
+                    pendingAutoModeTimers.delete(capturedId);
+                    matchmaking.setPlayerAutoModeInAllRooms(capturedId, true);
                 }, 5000);
+                pendingAutoModeTimers.set(capturedId, autoTimer);
             }
         };
 
