@@ -672,11 +672,11 @@ const RANKS = [
     "Platinum MAX"
 ];
 const RANK_CHANGES: Record<string, number[]> = {
-    Bronze:   [20, 10,  5,  -5],
-    Silver:   [16,  8,  4, -12],
-    Gold:     [12,  6,  3, -20],
-    Diamond:  [ 8,  4,  2, -28],
-    Platinum: [ 5,  2,  1, -35],
+    Bronze:   [60, 30, 15, -10],
+    Silver:   [48, 24, 12, -17],
+    Gold:     [36, 18,  9, -24],
+    Diamond:  [24, 12,  6, -31],
+    Platinum: [15,  6,  3, -40],
 };
 function rankTier(name: string): string {
     if (name === "Platinum MAX") return "Platinum";
@@ -685,7 +685,6 @@ function rankTier(name: string): string {
 function calcRank(name: string, pts: number, pos: number): { name: string; pts: number } {
     const change = RANK_CHANGES[rankTier(name)][pos - 1];
     const idx    = RANKS.indexOf(name);
-    if (name === "Platinum MAX") return { name: "Platinum MAX", pts: Math.max(0, pts + change) };
     let np = pts + change, nn = name;
     if (np >= 100 && idx < RANKS.length - 1) { nn = RANKS[idx + 1]; np -= 100; }
     else if (np < 0) { if (name === "Bronze III") np = 0; else { nn = RANKS[idx - 1]; np = Math.max(0, 100 + np); } }
@@ -1650,6 +1649,21 @@ class GameEngine {
     }
 
     getFullState() {
+        // Hitung stok rarity di draw pile vs total kartu di pool match ini
+        const rarityStock: Record<string, { remaining: number; total: number }> = {};
+        for (const rarity of RARITY_ORDER) rarityStock[rarity] = { remaining: 0, total: 0 };
+        // Total = semua kartu dari provinsi terpilih (pool awal match)
+        const cardsPool = this.selectedProvinces.length > 0
+            ? ALL_CARDS.filter(c => this.selectedProvinces.includes(c.province))
+            : ALL_CARDS;
+        for (const card of cardsPool) {
+            if (rarityStock[card.rarity]) rarityStock[card.rarity].total++;
+        }
+        // Remaining = yang masih ada di draw pile
+        for (const card of this.gs.drawPile) {
+            if (rarityStock[card.rarity]) rarityStock[card.rarity].remaining++;
+        }
+
         return {
             round: this.gs.round, phase: this.gs.phase, phase1Player: this.gs.phase1Player,
             currentProvince: this.gs.currentProvince, topCard: this.gs.topCard,
@@ -1669,9 +1683,10 @@ class GameEngine {
                 disconnectedAt: p.disconnectedAt,
                 drawLevel: p.drawLevel ?? 1, drawCount: p.drawCount ?? 0
             })),
-            roundHistory: this.gs.roundHistory.slice(-10), // kirim 10 ronde terakhir saja
+            roundHistory: this.gs.roundHistory.slice(-10),
             winners: this.gs.winners.map(p => ({ id: p.id, name: p.name, rank: p.rank })),
-            gameOver: this.gs.gameOver
+            gameOver: this.gs.gameOver,
+            rarityStock // { mythic: {remaining:2,total:15}, legendary: {...}, ... }
         };
     }
 
