@@ -1800,6 +1800,7 @@ interface Player {
     joinTime: number;
     timeoutId?: number;
     userUid: string;
+    partyId?: string;
 }
 
 interface GameRoom {
@@ -1815,16 +1816,97 @@ interface GameRoom {
 class MatchmakingQueue {
     private queue: Player[] = [];
     private rooms: Map<string, GameRoom> = new Map();
+    // partyId → set of playerIds yang sudah masuk antrian dengan partyId itu
+    private partyGroups: Map<string, Player[]> = new Map();
     private readonly MATCH_SIZE = 4;
     private readonly WAIT_TIMEOUT = 30000;
+    // Timeout party: jika dalam 10 detik setelah party lengkap tidak ada 2 pemain lain → bot
+    private readonly PARTY_WAIT = 10000;
 
     addPlayer(player: Player) {
         console.log(`✅ ${player.name} masuk antrian. Total: ${this.queue.length + 1}`);
         this.queue.push(player);
+
+        // Kelola partyGroups jika player membawa partyId
+        if (player.partyId) {
+            const group = this.partyGroups.get(player.partyId) || [];
+            group.push(player);
+            this.partyGroups.set(player.partyId, group);
+            // Jika party sudah lengkap (2 anggota), coba match segera
+            if (group.length >= 2) {
+                this.tryMatchParty(player.partyId);
+                return;
+            }
+        }
+
         this.queue.forEach(p => {
             try { p.socket.send(JSON.stringify({ type: 'QUEUE_STATUS', message: `Mencari lawan... (${this.queue.length}/4)` })); } catch(e) {}
         });
         this.checkAndCreateMatch();
+    }
+
+    // Coba match party (2 anggota) + ambil sisa dari antrian umum / bot
+    private tryMatchParty(partyId: string) {
+        const partyPlayers = this.partyGroups.get(partyId);
+        if (!partyPlayers || partyPlayers.length < 2) return;
+        this.partyGroups.delete(partyId);
+
+        // Hapus anggota party dari antrian umum
+        partyPlayers.forEach(pp => {
+            const idx = this.queue.findIndex(q => q.id === pp.id);
+            if (idx !== -1) {
+                if (this.queue[idx].timeoutId) clearTimeout(this.queue[idx].timeoutId);
+                this.queue.splice(idx, 1);
+            }
+        });
+
+        // Ambil pemain lain dari antrian umum (non-party)
+        const othersNeeded = this.MATCH_SIZE - partyPlayers.length;
+        const others: Player[] = [];
+        for (let i = 0; i < this.queue.length && others.length < othersNeeded; i++) {
+            if (!this.queue[i].partyId) {
+                others.push(this.queue[i]);
+                if (this.queue[i].timeoutId) clearTimeout(this.queue[i].timeoutId);
+                this.queue.splice(i, 1);
+                i--;
+            }
+        }
+
+        const allPlayers = [...partyPlayers, ...others];
+        const botsNeeded = this.MATCH_SIZE - allPlayers.length;
+
+        if (others.length < othersNeeded && botsNeeded > 0) {
+            // Belum cukup pemain, tunggu PARTY_WAIT ms lalu isi bot
+            console.log(`⏳ Party ${partyId} menunggu ${othersNeeded - others.length} pemain lagi (${this.PARTY_WAIT / 1000}s)...`);
+            partyPlayers.forEach(p => {
+                try { p.socket.send(JSON.stringify({ type: 'QUEUE_STATUS', message: `Party ditemukan! Mencari lawan... (${allPlayers.length}/4)` })); } catch(e) {}
+            });
+            setTimeout(() => {
+                // Cek lagi setelah timeout
+                const extraNeeded = this.MATCH_SIZE - allPlayers.length;
+                const extra: Player[] = [];
+                for (let i = 0; i < this.queue.length && extra.length < extraNeeded; i++) {
+                    if (!this.queue[i].partyId) {
+                        extra.push(this.queue[i]);
+                        if (this.queue[i].timeoutId) clearTimeout(this.queue[i].timeoutId);
+                        this.queue.splice(i, 1);
+                        i--;
+                    }
+                }
+                const finalPlayers = [...allPlayers, ...extra];
+                const finalBots = this.MATCH_SIZE - finalPlayers.length;
+                finalPlayers.forEach(p => {
+                    try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: finalPlayers.length, bots: finalBots })); } catch(e) {}
+                });
+                this.createMatch(finalPlayers, finalBots);
+            }, this.PARTY_WAIT);
+            return;
+        }
+
+        allPlayers.forEach(p => {
+            try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: allPlayers.length, bots: botsNeeded })); } catch(e) {}
+        });
+        this.createMatch(allPlayers, botsNeeded);
     }
 
     private checkAndCreateMatch() {
@@ -1917,6 +1999,15 @@ class MatchmakingQueue {
         if (idx !== -1) {
             const p = this.queue[idx];
             if (p.timeoutId) clearTimeout(p.timeoutId);
+            // Bersihkan dari partyGroups jika ada
+            if (p.partyId) {
+                const group = this.partyGroups.get(p.partyId);
+                if (group) {
+                    const gi = group.findIndex(gp => gp.id === playerId);
+                    if (gi !== -1) group.splice(gi, 1);
+                    if (group.length === 0) this.partyGroups.delete(p.partyId);
+                }
+            }
             this.queue.splice(idx, 1);
         }
     }
@@ -2070,7 +2161,8 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                             id: `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
                             name: data.playerName || `Player_${Math.floor(Math.random()*9999)}`,
                             socket, joinTime: Date.now(),
-                            userUid: data.userUid || ''
+                            userUid: data.userUid || '',
+                            partyId: data.partyId || undefined
                         };
                         matchmaking.addPlayer(currentPlayer);
                         break;
