@@ -1943,7 +1943,7 @@ class MatchmakingQueue {
                         i--;
                     }
                 }
-                const finalPlayers = [...allPlayers, ...extra];
+                const finalPlayers = [...allPlayers, ...extra].filter(p => p.socket.readyState === 1);
                 const finalBots = this.MATCH_SIZE - finalPlayers.length;
                 finalPlayers.forEach(p => {
                     try { p.socket.send(JSON.stringify({ type: 'MATCH_STARTING', humans: finalPlayers.length, bots: finalBots })); } catch(e) {}
@@ -2109,8 +2109,14 @@ class MatchmakingQueue {
             }
         });
 
-        // Pending custom rooms dibersihkan secara event-driven di leavePendingCustomRoom
-        // (saat semua socket mati / semua player keluar). Tidak perlu timer di sini.
+        // TTL fallback: hapus pending custom room yang terlalu lama tidak dimulai (2 jam)
+        const MAX_PENDING_AGE = 2 * 60 * 60 * 1000;
+        this.pendingCustomRooms.forEach((room, roomId) => {
+            if (!room.started && (now - room.createdAt) > MAX_PENDING_AGE) {
+                console.log(`🗑️ Cleanup stale pending custom room ${roomId}`);
+                this.pendingCustomRooms.delete(roomId);
+            }
+        });
     }
 
     getStats() {
