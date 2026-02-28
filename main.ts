@@ -1836,7 +1836,7 @@ interface CustomRoomSlot { id: string; name: string; socket: WebSocket; userUid:
 interface PendingCustomRoom {
     id: string; hostUid: string; hostRole: 'pemain' | 'penonton';
     players: CustomRoomSlot[];
-    botSlots: { level: number }[];
+    botSlots: { [slotPos: number]: { level: number } };
     spectatorSocket?: WebSocket; spectatorName?: string; spectatorUid?: string;
     started: boolean; createdAt: number;
 }
@@ -2149,7 +2149,7 @@ class MatchmakingQueue {
         let roomId: string;
         do { roomId = `cr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`; }
         while (this.pendingCustomRooms.has(roomId) || this.rooms.has(roomId));
-        const entry: PendingCustomRoom = { id: roomId, hostUid, hostRole, players: [], botSlots: [], started: false, createdAt: Date.now() };
+        const entry: PendingCustomRoom = { id: roomId, hostUid, hostRole, players: [], botSlots: {}, started: false, createdAt: Date.now() };
         let hostPlayerId: string | undefined;
         if (hostRole === 'pemain') {
             hostPlayerId = `crp_${Date.now()}`;
@@ -2173,7 +2173,7 @@ class MatchmakingQueue {
             return { success: false, error: 'Room tidak ditemukan' };
         }
         if (room.started) return { success: false, error: 'Pertandingan sudah dimulai' };
-        if (room.players.length + room.botSlots.length >= 4) return { success: false, error: 'Room sudah penuh (4 slot terisi)' };
+        if (room.players.length + Object.keys(room.botSlots).length >= 4) return { success: false, error: 'Room sudah penuh (4 slot terisi)' };
         // Cegah player yang sama masuk dua kali (misal dua tab browser)
         if (room.players.some(p => p.userUid === playerUid)) return { success: false, error: 'Kamu sudah ada di room ini' };
         let pid: string;
@@ -2187,8 +2187,8 @@ class MatchmakingQueue {
         const room = this.pendingCustomRooms.get(roomId);
         if (!room) return;
         const humanSlots = room.players.map((p, i) => ({ slot: i + 1, name: p.name, uid: p.userUid, isBot: false }));
-        const botSlotsInfo = room.botSlots.map((b, i) => ({
-            slot: room.players.length + i + 1,
+        const botSlotsInfo = Object.entries(room.botSlots).map(([pos, b]) => ({
+            slot: parseInt(pos),
             name: `Bot Lv${b.level}`, level: b.level, isBot: true, uid: null
         }));
         const totalSlots = humanSlots.length + botSlotsInfo.length;
@@ -2203,7 +2203,7 @@ class MatchmakingQueue {
 
     startCustomRoomGame(roomId: string): boolean {
         const room = this.pendingCustomRooms.get(roomId);
-        const totalSlots = (room?.players.length ?? 0) + (room?.botSlots.length ?? 0);
+        const totalSlots = (room?.players.length ?? 0) + Object.keys(room?.botSlots ?? {}).length;
         if (!room || room.started || totalSlots < 2 || room.players.length < 1) return false;
         room.started = true;
 
@@ -2220,12 +2220,12 @@ class MatchmakingQueue {
 
             room.players.forEach(p => gameEngine.addPlayer({ id: p.id, name: p.name, isBot: false, socket: p.socket, userUid: p.userUid }));
             // Tambahkan bot sesuai slot yang sudah ditentukan host
-            room.botSlots.forEach(b => gameEngine.addBot(GameEngine.pickBotName(), b.level));
+            Object.values(room.botSlots).forEach(b => gameEngine.addBot(GameEngine.pickBotName(), b.level));
 
             const gameRoom: GameRoom = {
                 id: roomId,
                 players: room.players.map(p => ({ id: p.id, name: p.name, socket: p.socket, joinTime: Date.now(), userUid: p.userUid })),
-                bots: room.botSlots.length, status: 'starting', gameEngine, createdAt: Date.now()
+                bots: Object.keys(room.botSlots).length, status: 'starting', gameEngine, createdAt: Date.now()
             };
             this.rooms.set(roomId, gameRoom);
             this.pendingCustomRooms.delete(roomId); // hapus dari pending hanya jika setup berhasil
@@ -2375,22 +2375,27 @@ class MatchmakingQueue {
     // ============================
     // BOT SLOT MANAGEMENT
     // ============================
-    addBotSlotToCustomRoom(roomId: string, level: number, requestingUid: string): { success: boolean; error?: string } {
+    addBotSlotToCustomRoom(roomId: string, level: number, requestingUid: string, slotPosition: number): { success: boolean; error?: string } {
         const room = this.pendingCustomRooms.get(roomId);
         if (!room || room.started) return { success: false, error: 'Room tidak valid' };
         if (room.hostUid !== requestingUid) return { success: false, error: 'Hanya host yang bisa menambah bot' };
-        if (room.players.length + room.botSlots.length >= 4) return { success: false, error: 'Room sudah penuh (maks 4 slot)' };
+        const minSlot = room.hostRole === 'pemain' ? 2 : 1;
+        if (slotPosition < minSlot || slotPosition > 4) return { success: false, error: 'Posisi slot tidak valid' };
+        if (room.botSlots[slotPosition]) return { success: false, error: 'Slot sudah ada bot' };
+        const humanAtSlot = room.players.some((_, i) => i + 1 === slotPosition);
+        if (humanAtSlot) return { success: false, error: 'Slot sudah ditempati pemain' };
+        if (room.players.length + Object.keys(room.botSlots).length >= 4) return { success: false, error: 'Room sudah penuh (maks 4 slot)' };
         if (level < 1 || level > 3) return { success: false, error: 'Level bot harus 1–3' };
-        room.botSlots.push({ level });
+        room.botSlots[slotPosition] = { level };
         return { success: true };
     }
 
-    removeBotSlotFromCustomRoom(roomId: string, slotIndex: number, requestingUid: string): { success: boolean; error?: string } {
+    removeBotSlotFromCustomRoom(roomId: string, slotPosition: number, requestingUid: string): { success: boolean; error?: string } {
         const room = this.pendingCustomRooms.get(roomId);
         if (!room || room.started) return { success: false, error: 'Room tidak valid' };
         if (room.hostUid !== requestingUid) return { success: false, error: 'Hanya host yang bisa menghapus bot' };
-        if (slotIndex < 0 || slotIndex >= room.botSlots.length) return { success: false, error: 'Slot bot tidak valid' };
-        room.botSlots.splice(slotIndex, 1);
+        if (!room.botSlots[slotPosition]) return { success: false, error: 'Tidak ada bot di slot tersebut' };
+        delete room.botSlots[slotPosition];
         return { success: true };
     }
 
@@ -2420,7 +2425,7 @@ class MatchmakingQueue {
         const room = this.pendingCustomRooms.get(roomId);
         if (!room || room.started) return { success: false, error: 'Room tidak valid' };
         if (room.hostUid !== fromUid) return { success: false, error: 'Hanya host yang bisa mengundang' };
-        if (room.players.length + room.botSlots.length >= 4) return { success: false, error: 'Room sudah penuh' };
+        if (room.players.length + Object.keys(room.botSlots).length >= 4) return { success: false, error: 'Room sudah penuh' };
         if (room.players.some(p => p.userUid === toUid)) return { success: false, error: 'Pemain sudah ada di room' };
         const target = this.onlineRegistry.get(toUid);
         if (!target || target.socket.readyState !== 1) return { success: false, error: 'Pemain tidak tersedia (offline/sibuk)' };
@@ -2870,10 +2875,14 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         break;
 
                     // ── Bot slot management ─────────────────────────────────────────
-                    case 'ADD_BOT_SLOT':
-                        if (currentCustomRoomId && currentPlayer?.userUid) {
+                    case 'ADD_BOT_SLOT': {
+                        // Spectator-host tidak punya currentPlayer, ambil uid dari room.hostUid
+                        const crRoom = currentCustomRoomId ? matchmaking.getPendingCustomRoom(currentCustomRoomId) : null;
+                        const requestingUid = currentPlayer?.userUid ?? crRoom?.hostUid;
+                        if (currentCustomRoomId && requestingUid) {
                             const level = Math.min(Math.max(parseInt(data.level) || 1, 1), 3);
-                            const addRes = matchmaking.addBotSlotToCustomRoom(currentCustomRoomId, level, currentPlayer.userUid);
+                            const slotPosition = Math.min(Math.max(parseInt(data.slotPosition) || 2, 1), 4);
+                            const addRes = matchmaking.addBotSlotToCustomRoom(currentCustomRoomId, level, requestingUid, slotPosition);
                             if (addRes.success) {
                                 matchmaking.broadcastPendingCustomRoomUpdate(currentCustomRoomId);
                             } else {
@@ -2881,11 +2890,14 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                             }
                         }
                         break;
+                    }
 
-                    case 'REMOVE_BOT_SLOT':
-                        if (currentCustomRoomId && currentPlayer?.userUid) {
-                            const slotIdx = parseInt(data.slotIndex) ?? 0;
-                            const remRes = matchmaking.removeBotSlotFromCustomRoom(currentCustomRoomId, slotIdx, currentPlayer.userUid);
+                    case 'REMOVE_BOT_SLOT': {
+                        const crRoom2 = currentCustomRoomId ? matchmaking.getPendingCustomRoom(currentCustomRoomId) : null;
+                        const requestingUid2 = currentPlayer?.userUid ?? crRoom2?.hostUid;
+                        if (currentCustomRoomId && requestingUid2) {
+                            const slotPosition = Math.min(Math.max(parseInt(data.slotPosition) || 2, 1), 4);
+                            const remRes = matchmaking.removeBotSlotFromCustomRoom(currentCustomRoomId, slotPosition, requestingUid2);
                             if (remRes.success) {
                                 matchmaking.broadcastPendingCustomRoomUpdate(currentCustomRoomId);
                             } else {
@@ -2893,6 +2905,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                             }
                         }
                         break;
+                    }
 
                     // ── Invite system ────────────────────────────────────────────────
                     case 'INVITE_TO_ROOM':
