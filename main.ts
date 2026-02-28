@@ -1129,8 +1129,8 @@ class GameEngine {
         let card: Card;
 
         if (level === 1) {
-            // Level 1 (Bronze): kartu acak — simulasi pemain pemula, tidak ada strategi
-            card = bot.hand[Math.floor(Math.random() * bot.hand.length)];
+            // Level 1 (Bronze): mainkan kartu dengan power terbesar
+            card = [...bot.hand].sort((a, b) => b.power - a.power)[0];
         } else if (level === 2) {
             // Level 2 (Gold): pilih provinsi dengan kartu terbanyak di tangan,
             // lalu mainkan power terkecil dari provinsi itu (hemat high-power untuk Phase 1 berikutnya)
@@ -1240,12 +1240,12 @@ class GameEngine {
         }
         const matching = bot.hand.filter(c => c.province === this.gs.currentProvince);
         if (matching.length > 0) {
-            // Level 1 (Bronze): mainkan kartu acak — pemula tidak punya strategi
+            // Level 1 (Bronze): mainkan kartu matching dengan power terbesar
             // Level 2 & 3 (Gold/Platinum): mainkan power terkecil dulu (hemat high-power untuk Phase 1)
             const level = bot.botLevel ?? 1;
             let sortedMatching: Card[];
             if (level === 1) {
-                sortedMatching = [...matching].sort(() => Math.random() - 0.5);
+                sortedMatching = [...matching].sort((a, b) => b.power - a.power);
             } else {
                 sortedMatching = [...matching].sort((a, b) => a.power - b.power);
             }
@@ -1325,7 +1325,7 @@ class GameEngine {
         } else {
             mustPickPlayers.forEach(bot => {
                 if (this.gs.topCard.length > 0) {
-                    // Level 1: ambil power terkecil; Level 2: acak; Level 3: power terbesar
+                    // Level 1: ambil power terkecil (pemula); Level 2: acak; Level 3: power terbesar
                     const level = bot.botLevel ?? 1;
                     let chosen;
                     if (level === 1) {
@@ -1400,7 +1400,7 @@ class GameEngine {
 
         this.gs.forcePickPlayers.filter(p => p.isBot && !p.hasPlayed).forEach(bot => {
             if (this.gs.topCard.length > 0) {
-                // Level 1: ambil power terkecil; Level 2: acak; Level 3: power terbesar
+                // Level 1: ambil power terkecil (pemula); Level 2: acak; Level 3: power terbesar
                 const level = bot.botLevel ?? 1;
                 let chosen;
                 if (level === 1) {
