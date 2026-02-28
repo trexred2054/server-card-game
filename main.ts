@@ -2204,7 +2204,8 @@ class MatchmakingQueue {
     startCustomRoomGame(roomId: string): boolean {
         const room = this.pendingCustomRooms.get(roomId);
         const totalSlots = (room?.players.length ?? 0) + Object.keys(room?.botSlots ?? {}).length;
-        if (!room || room.started || totalSlots < 2 || room.players.length < 1) return false;
+        const minHumans = room?.hostRole === 'penonton' ? 0 : 1;
+        if (!room || room.started || totalSlots < 2 || room.players.length < minHumans) return false;
         room.started = true;
 
         try {
