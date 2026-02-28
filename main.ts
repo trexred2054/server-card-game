@@ -501,6 +501,14 @@ ALL_PROVINCES.forEach(province => {
 });
 
 // =============================================
+// UTILITIES
+// =============================================
+function sanitizeName(name: unknown): string {
+    if (typeof name !== 'string') return '';
+    return name.trim().replace(/[\x00-\x1F\x7F]/g, '').slice(0, 30);
+}
+
+// =============================================
 // DRAW CARD LEVEL SYSTEM
 // Level 1 (awal) → Level 5 (tertinggi)
 // Naik level berdasarkan jumlah draw: L1→L2: 2, L2→L3: 3, L3→L4: 4, L4→L5: 5 (total 14 draw)
@@ -2569,13 +2577,12 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
         socket.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                console.log(`📨 [${currentPlayer?.name || 'unknown'}] ${data.type}`);
 
                 switch (data.type) {
                     case 'JOIN_MATCHMAKING':
                         currentPlayer = {
                             id: `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
-                            name: data.playerName || `Player_${Math.floor(Math.random()*9999)}`,
+                            name: sanitizeName(data.playerName) || `Player_${Math.floor(Math.random()*9999)}`,
                             socket, joinTime: Date.now(),
                             userUid: data.userUid || '',
                             partyId: data.partyId || undefined,
@@ -2735,11 +2742,12 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         if (currentCustomRoomId || (data.userUid && matchmaking.findRoomByUserUid(data.userUid))) {
                             socket.send(JSON.stringify({ type: 'ERROR', message: 'Sudah berada di room lain. Keluar dulu.' }));
                         } else if (data.playerName && data.userUid && (data.role === 'pemain' || data.role === 'penonton')) {
-                            const crResult = matchmaking.createPendingCustomRoom(data.playerName, data.userUid, data.role, socket);
+                            const sanitizedName = sanitizeName(data.playerName) || 'Player';
+                            const crResult = matchmaking.createPendingCustomRoom(sanitizedName, data.userUid, data.role, socket);
                             currentCustomRoomId = crResult.roomId;
                             isCustomRoomSpectator = data.role === 'penonton';
                             if (data.role === 'pemain' && crResult.hostPlayerId) {
-                                currentPlayer = { id: crResult.hostPlayerId, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                currentPlayer = { id: crResult.hostPlayerId, name: sanitizedName, socket, joinTime: Date.now(), userUid: data.userUid };
                             }
                             socket.send(JSON.stringify({ type: 'CUSTOM_ROOM_CREATED', roomId: crResult.roomId }));
                         }
@@ -2749,9 +2757,10 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         if (currentCustomRoomId || (data.userUid && matchmaking.findRoomByUserUid(data.userUid))) {
                             socket.send(JSON.stringify({ type: 'ERROR', message: 'Sudah berada di room lain. Keluar dulu.' }));
                         } else if (data.roomId && data.playerName && data.userUid) {
-                            const joinResult = matchmaking.joinPendingCustomRoom(data.roomId, data.playerName, data.userUid, socket);
+                            const sanitizedName = sanitizeName(data.playerName) || 'Player';
+                            const joinResult = matchmaking.joinPendingCustomRoom(data.roomId, sanitizedName, data.userUid, socket);
                             if (joinResult.success) {
-                                currentPlayer = { id: joinResult.playerId!, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                currentPlayer = { id: joinResult.playerId!, name: sanitizedName, socket, joinTime: Date.now(), userUid: data.userUid };
                                 currentCustomRoomId = data.roomId;
                                 matchmaking.broadcastPendingCustomRoomUpdate(data.roomId);
                             } else {
@@ -2788,11 +2797,12 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                     case 'CREATE_PARTY':
                         // Pemain buat party di layar Main Online
                         if (data.userUid && data.playerName && !currentPartyId) {
+                            const sanitizedName = sanitizeName(data.playerName) || 'Player';
                             if (!currentPlayer) {
-                                currentPlayer = { id: data.userUid, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                currentPlayer = { id: data.userUid, name: sanitizedName, socket, joinTime: Date.now(), userUid: data.userUid };
                             }
                             matchmaking.unregisterOnline(data.userUid);
-                            currentPartyId = matchmaking.createPartyLobby(data.userUid, data.playerName, socket);
+                            currentPartyId = matchmaking.createPartyLobby(data.userUid, sanitizedName, socket);
                             socket.send(JSON.stringify({ type: 'PARTY_CREATED', partyId: currentPartyId }));
                             matchmaking.broadcastPartyUpdate(currentPartyId);
                         }
@@ -2813,7 +2823,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                     case 'PARTY_INVITE_RESPONSE':
                         // Target terima / tolak undangan party
                         if (data.inviteId && data.userUid) {
-                            const pName = currentPlayer?.name || data.playerName || 'Player';
+                            const pName = currentPlayer?.name || sanitizeName(data.playerName) || 'Player';
                             const pRespRes = matchmaking.respondToPartyInvite(data.inviteId, data.userUid, !!data.accepted, socket, pName);
                             if (data.accepted && pRespRes.success) {
                                 currentPartyId = pRespRes.partyId!;
@@ -2860,10 +2870,11 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                     case 'REGISTER_ONLINE':
                         // Client kirim ini saat ada di home screen (idle)
                         if (data.userUid && data.playerName) {
-                            matchmaking.registerOnline(data.userUid, data.playerName, socket);
+                            const sanitizedName = sanitizeName(data.playerName) || 'Player';
+                            matchmaking.registerOnline(data.userUid, sanitizedName, socket);
                             if (!currentPlayer) {
                                 // Simpan identitas dasar agar onclose bisa cleanup
-                                currentPlayer = { id: data.userUid, name: data.playerName, socket, joinTime: Date.now(), userUid: data.userUid };
+                                currentPlayer = { id: data.userUid, name: sanitizedName, socket, joinTime: Date.now(), userUid: data.userUid };
                             }
                         }
                         break;
@@ -2925,7 +2936,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                     case 'INVITE_RESPONSE':
                         // Target menjawab undangan: accepted=true/false
                         if (data.inviteId && data.userUid) {
-                            const pName = currentPlayer?.name || data.playerName || 'Player';
+                            const pName = currentPlayer?.name || sanitizeName(data.playerName) || 'Player';
                             const respRes = matchmaking.respondToInvite(data.inviteId, data.userUid, !!data.accepted, socket, pName);
                             if (data.accepted && respRes.success) {
                                 // Daftarkan sebagai currentPlayer & masuk room
