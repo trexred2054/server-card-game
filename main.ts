@@ -2117,12 +2117,12 @@ class MatchmakingQueue {
     }
 
     // Cari room aktif berdasarkan userUid — untuk support login di device berbeda
-    findRoomByUserUid(userUid: string): { roomId: string; playerId: string; playerName: string } | null {
+    findRoomByUserUid(userUid: string): { roomId: string; playerId: string; playerName: string; isCustomRoom: boolean } | null {
         if (!userUid || userUid === 'BOT') return null;
         for (const [roomId, room] of this.rooms) {
             if (room.status !== 'playing' && room.status !== 'starting') continue;
             const player = room.gameEngine.gs.players.find(p => !p.isBot && p.userUid === userUid);
-            if (player) return { roomId, playerId: player.id, playerName: player.name };
+            if (player) return { roomId, playerId: player.id, playerName: player.name, isCustomRoom: room.gameEngine.isCustomRoom };
         }
         return null;
     }
@@ -2686,7 +2686,8 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                             type: 'GAME_STARTED',
                                             roomId: data.roomId,
                                             playerId: data.playerId,
-                                            state: room.gameEngine.getFullState()
+                                            state: room.gameEngine.getFullState(),
+                                            isCustomRoom: room.gameEngine.isCustomRoom
                                         }));
                                     } else {
                                         // Status 'starting' — kirim ulang info provinsi + state terkini
