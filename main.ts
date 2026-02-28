@@ -510,40 +510,60 @@ function sanitizeName(name: unknown): string {
 
 // =============================================
 // DRAW CARD LEVEL SYSTEM
-// Level 1 (awal) → Level 5 (tertinggi)
-// Naik level berdasarkan jumlah draw: L1→L2: 2, L2→L3: 3, L3→L4: 4, L4→L5: 5 (total 14 draw)
+// Level 1 (awal) → Level 10 (tertinggi)
+// Naik level setiap 2 draw (total 18 draw untuk mencapai Level 10)
+// Prioritas: rarity dengan skor tertinggi di-draw lebih dulu (greedy)
 // =============================================
 const DRAW_RATES: Record<number, Record<string, number>> = {
-    1: { // Level 1 - awal permainan
-        mythic: 0.5, legendary: 1, epic: 2.5, rareplus: 5, rarestar: 8,
-        rare: 12, uncommon: 16, uncommonplus: 18, commonplus: 19, common: 18
+    1: { // Level 1 - Common dominan (22%)
+        common: 22, commonplus: 16, uncommonplus: 13, uncommon: 11,
+        rare: 10, rarestar: 9, rareplus: 8, epic: 6, legendary: 4, mythic: 1
     },
-    2: { // Level 2
-        mythic: 2, legendary: 4, epic: 7, rareplus: 10, rarestar: 12,
-        rare: 15, uncommon: 18, uncommonplus: 15, commonplus: 9.5, common: 7.5
+    2: { // Level 2 - Common+ dominan (21%)
+        commonplus: 21, common: 16, uncommonplus: 15, uncommon: 13,
+        rare: 11, rarestar: 10, rareplus: 7, epic: 4, legendary: 2, mythic: 1
     },
-    3: { // Level 3
-        mythic: 5, legendary: 8, epic: 12, rareplus: 13, rarestar: 13,
-        rare: 12, uncommon: 13, uncommonplus: 10, commonplus: 8, common: 6
+    3: { // Level 3 - Uncommon+ dominan (20%)
+        uncommonplus: 20, uncommon: 14, commonplus: 15, common: 13,
+        rare: 12, rarestar: 11, rareplus: 8, epic: 4, legendary: 2, mythic: 1
     },
-    4: { // Level 4
-        mythic: 8, legendary: 12, epic: 15, rareplus: 15, rarestar: 14,
-        rare: 13, uncommon: 10, uncommonplus: 7, commonplus: 3.5, common: 2.5
+    4: { // Level 4 - Uncommon dominan (19%)
+        uncommon: 19, uncommonplus: 15, commonplus: 13, common: 11,
+        rare: 13, rarestar: 12, rareplus: 9, epic: 5, legendary: 2, mythic: 1
     },
-    5: { // Level 5 - tertinggi
-        mythic: 25, legendary: 20, epic: 15, rareplus: 12, rarestar: 10,
-        rare: 8, uncommon: 5, uncommonplus: 3, commonplus: 1.5, common: 0.5
+    5: { // Level 5 - Rare dominan (18%)
+        rare: 18, uncommon: 14, rarestar: 13, uncommonplus: 13,
+        rareplus: 11, commonplus: 11, common: 10, epic: 8, legendary: 1, mythic: 1
+    },
+    6: { // Level 6 - Rare★ dominan (17%)
+        rarestar: 17, rare: 14, uncommon: 13, rareplus: 12,
+        uncommonplus: 11, commonplus: 10, epic: 9, common: 9, legendary: 4, mythic: 1
+    },
+    7: { // Level 7 - Rare+ dominan (16%)
+        rareplus: 16, rarestar: 14, rare: 13, uncommon: 11,
+        epic: 12, uncommonplus: 10, commonplus: 9, common: 8, legendary: 5, mythic: 2
+    },
+    8: { // Level 8 - Epic dominan (15%)
+        epic: 15, rareplus: 14, rarestar: 13, legendary: 11,
+        rare: 11, uncommon: 10, uncommonplus: 9, commonplus: 8, common: 7, mythic: 2
+    },
+    9: { // Level 9 - Legendary dominan (14%)
+        legendary: 14, epic: 14, rareplus: 13, rarestar: 11,
+        rare: 10, uncommon: 9, uncommonplus: 8, commonplus: 7, common: 6, mythic: 8
+    },
+    10: { // Level 10 - Mythic dominan (20%)
+        mythic: 20, legendary: 17, epic: 14, rareplus: 11,
+        rarestar: 10, rare: 9, uncommon: 7, uncommonplus: 6, commonplus: 4, common: 2
     }
 };
 const RARITY_ORDER = ['mythic','legendary','epic','rareplus','rarestar','rare','uncommon','uncommonplus','commonplus','common'];
-const LEVEL_NAMES: Record<number, string> = { 1: 'Lv1', 2: 'Lv2', 3: 'Lv3', 4: 'Lv4', 5: 'Lv5' };
-// Threshold kumulatif draw untuk naik level: L1→L2=2, L2→L3=5, L3→L4=9, L4→L5=14
+const LEVEL_NAMES: Record<number, string> = {
+    1: 'Lv1', 2: 'Lv2', 3: 'Lv3', 4: 'Lv4', 5: 'Lv5',
+    6: 'Lv6', 7: 'Lv7', 8: 'Lv8', 9: 'Lv9', 10: 'Lv10'
+};
+// Threshold: naik level setiap 2 draw (Lv1→Lv2=2, Lv2→Lv3=4, ..., Lv9→Lv10=18)
 function calcDrawLevel(drawCount: number): number {
-    if (drawCount >= 14) return 5;
-    if (drawCount >= 9)  return 4;
-    if (drawCount >= 5)  return 3;
-    if (drawCount >= 2)  return 2;
-    return 1;
+    return Math.min(Math.floor(drawCount / 2) + 1, 10);
 }
 
 // =============================================
