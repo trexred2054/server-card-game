@@ -782,8 +782,12 @@ class GameEngine {
     selectedProvinces: string[] = [];
     isCustomRoom: boolean = false;
     spectatorSockets: WebSocket[] = [];
+    spectatorUserUids: string[] = [];
 
-    addSpectator(socket: WebSocket) { this.spectatorSockets.push(socket); }
+    addSpectator(socket: WebSocket, userUid?: string) {
+        this.spectatorSockets.push(socket);
+        if (userUid && !this.spectatorUserUids.includes(userUid)) this.spectatorUserUids.push(userUid);
+    }
     removeSpectator(socket: WebSocket) { this.spectatorSockets = this.spectatorSockets.filter(s => s !== socket); }
 
     setSelectedProvinces(provinces: string[]) {
@@ -1653,6 +1657,7 @@ class GameEngine {
             });
         // Bersihkan referensi spectator socket agar tidak memory leak
         this.spectatorSockets = [];
+        this.spectatorUserUids = [];
     }
 
     getFullState() {
@@ -2125,14 +2130,27 @@ class MatchmakingQueue {
     }
 
     // Cari room aktif berdasarkan userUid — untuk support login di device berbeda
-    findRoomByUserUid(userUid: string): { roomId: string; playerId: string; playerName: string; isCustomRoom: boolean } | null {
+    findRoomByUserUid(userUid: string): { roomId: string; playerId: string; playerName: string; isCustomRoom: boolean; isSpectator?: boolean } | null {
         if (!userUid || userUid === 'BOT') return null;
         for (const [roomId, room] of this.rooms) {
             if (room.status !== 'playing' && room.status !== 'starting') continue;
             const player = room.gameEngine.gs.players.find(p => !p.isBot && p.userUid === userUid);
             if (player) return { roomId, playerId: player.id, playerName: player.name, isCustomRoom: room.gameEngine.isCustomRoom };
+            // Cek apakah userUid ini adalah spectator di room ini
+            if (room.gameEngine.spectatorUserUids.includes(userUid)) {
+                return { roomId, playerId: '', playerName: '', isCustomRoom: room.gameEngine.isCustomRoom, isSpectator: true };
+            }
         }
         return null;
+    }
+
+    // Rejoin sebagai spectator — tambahkan kembali socket ke spectatorSockets
+    rejoinAsSpectator(roomId: string, userUid: string, socket: WebSocket): boolean {
+        const room = this.rooms.get(roomId);
+        if (!room || (room.status !== 'playing' && room.status !== 'starting')) return false;
+        if (!room.gameEngine.spectatorUserUids.includes(userUid)) return false;
+        room.gameEngine.spectatorSockets.push(socket);
+        return true;
     }
 
     // ============================
@@ -2219,7 +2237,7 @@ class MatchmakingQueue {
         try {
             const gameEngine = new GameEngine(roomId);
             gameEngine.isCustomRoom = true;
-            if (room.spectatorSocket) gameEngine.addSpectator(room.spectatorSocket);
+            if (room.spectatorSocket) gameEngine.addSpectator(room.spectatorSocket, room.spectatorUid);
 
             const MANDATORY_PROVINCE = 'Bangka Belitung';
             const otherProvinces = ALL_PROVINCES.filter(p => p.name !== MANDATORY_PROVINCE);
@@ -2734,6 +2752,30 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                 } else {
                                     socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sudah berakhir.' }));
                                 }
+                            }
+                        }
+                        break;
+
+                    case 'REJOIN_AS_SPECTATOR':
+                        if (data.roomId && data.userUid) {
+                            const success = matchmaking.rejoinAsSpectator(data.roomId, data.userUid, socket);
+                            if (success) {
+                                isCustomRoomSpectator = true;
+                                currentCustomRoomId = data.roomId;
+                                const room = matchmaking.getRoom(data.roomId);
+                                if (room) {
+                                    socket.send(JSON.stringify({
+                                        type: 'GAME_STARTED',
+                                        roomId: data.roomId,
+                                        playerId: null,
+                                        state: room.gameEngine.getFullState(),
+                                        isCustomRoom: true,
+                                        isSpectator: true
+                                    }));
+                                    console.log(`👁️ Spectator ${data.userUid} rejoined ${data.roomId}`);
+                                }
+                            } else {
+                                socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sesi penonton tidak valid.' }));
                             }
                         }
                         break;
