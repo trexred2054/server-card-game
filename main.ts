@@ -921,11 +921,11 @@ class GameEngine {
                                         _p.statsSaved = false;
                                         console.log(`❌ checkWin retry juga gagal uid=${_p.userUid}`);
                                     }
-                                });
+                                }).catch(e => { console.error(`❌ checkWin retry exception uid=${_p.userUid}:`, e); _p.statsSaved = false; });
                             }, 2000);
                         }
                     }
-                });
+                }).catch(e => { console.error(`❌ checkWin save exception uid=${_p.userUid}:`, e); _p.statsSaved = false; });
             }
         }
     }
@@ -1518,7 +1518,7 @@ class GameEngine {
                         try { _p.socket.send(JSON.stringify({ type: 'SAVE_STATS_CLIENT', rank: _p.rank })); } catch (_) { /* noop */ }
                     }
                 }
-            });
+            }).catch(e => { console.error(`❌ handleSurrender save exception uid=${_p.userUid}:`, e); _p.statsSaved = false; });
         }
 
         // Kartu player yang menyerah masuk ke discardPile
@@ -1630,7 +1630,7 @@ class GameEngine {
                             }));
                         } catch (_) {}
                     }
-                });
+                }).catch(e => { console.error(`❌ endGame save exception uid=${p.userUid}:`, e); });
             });
 
         // Beritahu matchmaking: game selesai, room bisa di-cleanup
@@ -1673,7 +1673,7 @@ class GameEngine {
                 savePlayerStats(p.userUid, p.name, p.rank).then(ok => {
                     if (!ok) p.statsSaved = false;
                     console.log(`${ok ? '✅' : '⚠️'} cleanupMatch saveStats uid=${p.userUid} pos=${p.rank}`);
-                });
+                }).catch(e => { console.error(`❌ cleanupMatch save exception uid=${p.userUid}:`, e); p.statsSaved = false; });
             });
         // Bersihkan referensi spectator socket agar tidak memory leak
         this.spectatorSockets = [];
@@ -1879,6 +1879,7 @@ class MatchmakingQueue {
     private rooms: Map<string, GameRoom> = new Map();
     // partyId → set of playerIds yang sudah masuk antrian dengan partyId itu
     private partyGroups: Map<string, Player[]> = new Map();
+    private partyGroupTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
     private readonly MATCH_SIZE = 4;
     private readonly WAIT_TIMEOUT = 30000;
     // Timeout party: jika dalam 10 detik setelah party lengkap tidak ada 2 pemain lain → bot
@@ -1901,10 +1902,13 @@ class MatchmakingQueue {
             }
             // Safety timeout: jika dalam 20 detik tidak semua bergabung, mulai saja
             if (group.length === 1) {
-                setTimeout(() => {
-                    const g = this.partyGroups.get(player.partyId!);
-                    if (g && g.length >= 2) this.tryMatchParty(player.partyId!);
+                const pid = player.partyId!;
+                const t = setTimeout(() => {
+                    this.partyGroupTimeouts.delete(pid);
+                    const g = this.partyGroups.get(pid);
+                    if (g && g.length >= 2) this.tryMatchParty(pid);
                 }, 20000);
+                this.partyGroupTimeouts.set(pid, t);
             }
             return;
         }
@@ -1920,6 +1924,8 @@ class MatchmakingQueue {
         const partyPlayers = this.partyGroups.get(partyId);
         if (!partyPlayers || partyPlayers.length < 2) return;
         this.partyGroups.delete(partyId);
+        const _pt = this.partyGroupTimeouts.get(partyId);
+        if (_pt) { clearTimeout(_pt); this.partyGroupTimeouts.delete(partyId); }
 
         // Hapus anggota party dari antrian umum
         partyPlayers.forEach(pp => {
@@ -2075,7 +2081,11 @@ class MatchmakingQueue {
                 if (group) {
                     const gi = group.findIndex(gp => gp.id === playerId);
                     if (gi !== -1) group.splice(gi, 1);
-                    if (group.length === 0) this.partyGroups.delete(p.partyId);
+                    if (group.length === 0) {
+                        this.partyGroups.delete(p.partyId);
+                        const _pt = this.partyGroupTimeouts.get(p.partyId);
+                        if (_pt) { clearTimeout(_pt); this.partyGroupTimeouts.delete(p.partyId); }
+                    }
                 }
             }
             this.queue.splice(idx, 1);
@@ -2682,7 +2692,7 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
 
                     case 'SURRENDER':
                         if (isCustomRoomSpectator) {
-                            socket.send(JSON.stringify({ type: 'ERROR', message: 'Spectator tidak dapat menyerah.' }));
+                            try { socket.send(JSON.stringify({ type: 'ERROR', message: 'Spectator tidak dapat menyerah.' })); } catch(_) {}
                         } else if (currentPlayer && data.roomId) {
                             const room = matchmaking.getRoom(data.roomId);
                             if (room) room.gameEngine.handleSurrender(currentPlayer.id);
@@ -2709,9 +2719,9 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                         if (data.userUid) {
                             const found = matchmaking.findRoomByUserUid(data.userUid);
                             if (found) {
-                                socket.send(JSON.stringify({ type: 'ROOM_FOUND', ...found }));
+                                try { socket.send(JSON.stringify({ type: 'ROOM_FOUND', ...found })); } catch(_) {}
                             } else {
-                                socket.send(JSON.stringify({ type: 'ROOM_NOT_FOUND' }));
+                                try { socket.send(JSON.stringify({ type: 'ROOM_NOT_FOUND' })); } catch(_) {}
                             }
                         }
                         break;
@@ -2741,21 +2751,21 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                     if (room.status === 'playing') {
                                         // Kirim GAME_STARTED agar client tahu harus masuk ke layar game,
                                         // bukan GAME_STATE_UPDATE yang mungkin diabaikan client di layar provinsi
-                                        socket.send(JSON.stringify({
+                                        try { socket.send(JSON.stringify({
                                             type: 'GAME_STARTED',
                                             roomId: data.roomId,
                                             playerId: data.playerId,
                                             state: room.gameEngine.getFullState(),
                                             isCustomRoom: room.gameEngine.isCustomRoom
-                                        }));
+                                        })); } catch(_) {}
                                     } else {
                                         // Status 'starting' — kirim ulang info provinsi + state terkini
-                                        socket.send(JSON.stringify({
+                                        try { socket.send(JSON.stringify({
                                             type: 'PROVINCES_SELECTED',
                                             provinces: room.gameEngine.selectedProvinces,
                                             mandatory: 'Bangka Belitung'
-                                        }));
-                                        socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: room.gameEngine.getFullState() }));
+                                        })); } catch(_) {}
+                                        try { socket.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: room.gameEngine.getFullState() })); } catch(_) {}
                                     }
                                     console.log(`🔄 ${data.playerId} rejoined ${data.roomId} (status: ${room.status})`);
                                 }
@@ -2766,12 +2776,12 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                     const gp = finishedRoom.gameEngine.getPlayerById(data.playerId);
                                     const uidOk = gp && (!gp.userUid || gp.userUid === (data.userUid || ''));
                                     if (uidOk) {
-                                        socket.send(JSON.stringify({
+                                        try { socket.send(JSON.stringify({
                                             type: 'GAME_OVER',
                                             players: finishedRoom.gameEngine.gs.players.map(p => ({
                                                 id: p.id, name: p.name, rank: p.rank, hand: p.hand, isBot: p.isBot
                                             }))
-                                        }));
+                                        })); } catch(_) {}
                                         // Kirim SAVE_STATS_CLIENT agar client menyimpan stats sebagai fallback
                                         // (server sudah mencoba simpan saat game selesai, tapi socket lama mungkin sudah putus)
                                         if (gp && gp.rank > 0) {
@@ -2781,10 +2791,10 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                         }
                                         console.log(`📤 GAME_OVER dikirim ulang ke ${data.playerId} (late rejoin - room sudah finished)`);
                                     } else {
-                                        socket.send(JSON.stringify({ type: 'ERROR', message: 'Akun tidak cocok.' }));
+                                        try { socket.send(JSON.stringify({ type: 'ERROR', message: 'Akun tidak cocok.' })); } catch(_) {}
                                     }
                                 } else {
-                                    socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sudah berakhir.' }));
+                                    try { socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sudah berakhir.' })); } catch(_) {}
                                 }
                             }
                         }
@@ -2798,18 +2808,18 @@ Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000") }, async (req) => {
                                 currentCustomRoomId = data.roomId;
                                 const room = matchmaking.getRoom(data.roomId);
                                 if (room) {
-                                    socket.send(JSON.stringify({
+                                    try { socket.send(JSON.stringify({
                                         type: 'GAME_STARTED',
                                         roomId: data.roomId,
                                         playerId: null,
                                         state: room.gameEngine.getFullState(),
                                         isCustomRoom: true,
                                         isSpectator: true
-                                    }));
+                                    })); } catch(_) {}
                                     console.log(`👁️ Spectator ${data.userUid} rejoined ${data.roomId}`);
                                 }
                             } else {
-                                socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sesi penonton tidak valid.' }));
+                                try { socket.send(JSON.stringify({ type: 'ERROR', message: 'Room tidak ditemukan atau sesi penonton tidak valid.' })); } catch(_) {}
                             }
                         }
                         break;
