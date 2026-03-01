@@ -2079,6 +2079,14 @@ class MatchmakingQueue {
                 }
             }
             this.queue.splice(idx, 1);
+            // Beritahu sisa pemain di antrian dengan jumlah terkini
+            this.queue.forEach(qp => {
+                try { qp.socket.send(JSON.stringify({ type: 'QUEUE_STATUS', message: `Mencari lawan... (${this.queue.length}/4)` })); } catch(_) {}
+            });
+            // Re-arm timeout untuk queue[0] yang baru jika belum ada
+            if (this.queue.length > 0 && !this.queue[0].timeoutId) {
+                this.queue[0].timeoutId = setTimeout(() => this.handleTimeout(), this.WAIT_TIMEOUT) as unknown as number;
+            }
         }
     }
 
