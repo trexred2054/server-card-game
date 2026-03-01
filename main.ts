@@ -1575,9 +1575,9 @@ class GameEngine {
             }
             if (activePlayers.length === 1) {
                 const loser = activePlayers[0];
-                // Cari rank terbaik (terkecil) yang belum dipakai, agar tidak tabrakan dengan surrenderer
+                // Cari rank terkecil yang belum dipakai, agar tidak tabrakan dengan surrenderer
                 const takenRanks = new Set(this.gs.winners.map(w => w.rank));
-                let loserRank = this.gs.winners.length + 1;
+                let loserRank = 1;
                 while (takenRanks.has(loserRank)) loserRank++;
                 loser.rank = loserRank; loser.winner = true;
                 this.gs.winners.push(loser);
@@ -1598,7 +1598,7 @@ class GameEngine {
         this.clearAllAfkTimers();
         // Assign rank untuk pemain yang belum punya rank, hindari tabrakan dengan surrenderer
         const takenRanks = new Set(this.gs.winners.map(w => w.rank));
-        let nextRank = this.gs.winners.length + 1;
+        let nextRank = 1;
         this.gs.players.filter(p => !p.winner).forEach(p => {
             while (takenRanks.has(nextRank)) nextRank++;
             p.rank = nextRank;
@@ -2178,7 +2178,7 @@ class MatchmakingQueue {
         if (!userUid || userUid === 'BOT') return null;
         for (const [roomId, room] of this.rooms) {
             if (room.status !== 'playing' && room.status !== 'starting') continue;
-            const player = room.gameEngine.gs.players.find(p => !p.isBot && p.userUid === userUid);
+            const player = room.gameEngine.gs.players.find(p => !p.isBot && p.userUid === userUid && !p.leftMatch);
             if (player) return { roomId, playerId: player.id, playerName: player.name, isCustomRoom: room.gameEngine.isCustomRoom };
             // Cek apakah userUid ini adalah spectator di room ini
             if (room.gameEngine.spectatorUserUids.includes(userUid)) {
@@ -2546,15 +2546,27 @@ class MatchmakingQueue {
     leavePendingCustomRoom(roomId: string, userUid: string, isSpectatorRole: boolean) {
         const room = this.pendingCustomRooms.get(roomId);
         if (!room || room.started) return;
+
+        const isHost = !isSpectatorRole && userUid === room.hostUid;
+
         if (isSpectatorRole) {
             room.spectatorSocket = undefined;
         } else {
             const idx = room.players.findIndex(p => p.userUid === userUid);
             if (idx !== -1) room.players.splice(idx, 1);
         }
-        // Hapus room jika:
-        // 1. Tidak ada pemain sama sekali DAN tidak ada spectator, ATAU
-        // 2. Semua socket yang tersisa sudah mati (disconnect tanpa kirim LEAVE)
+
+        // Jika host keluar → bubarkan room, beri tahu semua pemain yang tersisa
+        if (isHost) {
+            const disbandMsg = JSON.stringify({ type: 'ROOM_DISBANDED' });
+            room.players.forEach(p => { if (p.socket.readyState === 1) { try { p.socket.send(disbandMsg); } catch(_) {} } });
+            if (room.spectatorSocket?.readyState === 1) { try { room.spectatorSocket.send(disbandMsg); } catch(_) {} }
+            this.pendingCustomRooms.delete(roomId);
+            console.log(`🗑️ Custom room dibubarkan oleh host: ${roomId}`);
+            return;
+        }
+
+        // Hapus room jika tidak ada sisa pemain hidup
         const hasLivePlayer = room.players.some(p => p.socket.readyState === 1);
         const hasLiveSpectator = room.spectatorSocket != null && room.spectatorSocket.readyState === 1;
         if (!hasLivePlayer && !hasLiveSpectator) {
